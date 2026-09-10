@@ -78,10 +78,14 @@ fun DrawerContent(
     onSync: () -> Unit,
 ) {
     val colors = Telegram.colors
-    Column(Modifier.fillMaxSize().background(colors.panel)) {
+    Column(Modifier.fillMaxSize()) {
         Column(
             Modifier.fillMaxWidth()
-                .background(Brush.linearGradient(listOf(colors.accent, colors.accentSoft)))
+                .background(
+                    Brush.linearGradient(
+                        listOf(colors.accent.copy(alpha = 0.88f), colors.accentSoft.copy(alpha = 0.75f)),
+                    ),
+                )
                 .statusBarsPadding()
                 .padding(16.dp),
         ) {
@@ -172,14 +176,18 @@ private fun ThemeCard(
     onClick: () -> Unit,
 ) {
     val palette = theme.palette
-    val shape = RoundedCornerShape(12.dp)
+    val shape = GlassShape.Card
     Column(
         modifier
             .clip(shape)
-            .background(Brush.verticalGradient(listOf(palette.window, palette.chatBottom)))
+            .background(
+                Brush.linearGradient(
+                    listOf(palette.window, palette.accentSoft.copy(alpha = 0.55f), palette.chatBottom),
+                ),
+            )
             .border(
                 if (selected) 2.dp else 1.dp,
-                if (selected) Telegram.colors.accent else Telegram.colors.divider,
+                if (selected) Telegram.colors.accent else palette.glassRim,
                 shape,
             )
             .clickable(onClick = onClick)
@@ -231,8 +239,8 @@ fun TelegramScreen(
     content: LazyListScope.() -> Unit,
 ) {
     val colors = Telegram.colors
-    Column(modifier.fillMaxSize().background(colors.window)) {
-        Column(Modifier.background(colors.panel).statusBarsPadding()) {
+    Column(modifier.fillMaxSize()) {
+        Column(Modifier.glass(colors, GlassShape.Header, raised = true).statusBarsPadding()) {
             Row(
                 Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -255,7 +263,6 @@ fun TelegramScreen(
                 action()
             }
         }
-        HorizontalDivider(color = colors.divider, thickness = 1.dp)
         LazyColumn(
             Modifier.fillMaxSize().imePadding(),
             contentPadding = PaddingValues(bottom = 32.dp),
@@ -372,9 +379,9 @@ fun TelegramButton(text: String, onClick: () -> Unit, enabled: Boolean = true, m
     Button(
         onClick = onClick,
         enabled = enabled,
-        shape = RoundedCornerShape(10.dp),
+        shape = GlassShape.Capsule,
         colors = ButtonDefaults.buttonColors(
-            containerColor = Telegram.colors.accent,
+            containerColor = Telegram.colors.accent.copy(alpha = 0.92f),
             contentColor = Telegram.colors.onAccent,
             disabledContainerColor = Telegram.colors.accent.copy(alpha = .35f),
             disabledContentColor = Telegram.colors.onAccent.copy(alpha = .6f),
@@ -389,8 +396,10 @@ fun TelegramButton(text: String, onClick: () -> Unit, enabled: Boolean = true, m
 fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val colors = Telegram.colors
     Box(
-        modifier.clip(RoundedCornerShape(10.dp)).background(colors.field).clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+        modifier.clip(GlassShape.Capsule)
+            .glass(colors, GlassShape.Capsule)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 11.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(text, color = colors.accent, fontSize = 14.sp, fontWeight = FontWeight.Medium)
@@ -542,7 +551,9 @@ fun ContactProfileScreen(
     TelegramScreen(contact.displayName, onBack) {
         item {
             Column(
-                Modifier.fillMaxWidth().background(colors.panel).padding(vertical = 20.dp),
+                Modifier.fillMaxWidth().padding(14.dp)
+                    .glass(colors, GlassShape.Panel, raised = true)
+                    .padding(vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Avatar(contact.displayName, contact.userId, contact.avatarBase64, 96.dp)
@@ -608,7 +619,9 @@ fun SettingsScreen(
     TelegramScreen("Настройки", onBack) {
         item {
             Column(
-                Modifier.fillMaxWidth().background(colors.panel).padding(vertical = 20.dp),
+                Modifier.fillMaxWidth().padding(14.dp)
+                    .glass(colors, GlassShape.Panel, raised = true)
+                    .padding(vertical = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Box(contentAlignment = Alignment.BottomEnd) {

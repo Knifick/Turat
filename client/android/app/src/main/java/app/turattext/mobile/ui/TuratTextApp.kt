@@ -35,7 +35,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -117,15 +116,16 @@ fun TuratTextApp(
     // поэтому жест шторки живёт только на самом списке.
     val chatListVisible = state.selectedContact == null
 
-    Box(Modifier.fillMaxSize().background(colors.window)) {
+    AuroraBackground(Modifier.fillMaxSize()) {
         ModalNavigationDrawer(
             drawerState = drawerState,
             gesturesEnabled = drawerState.isOpen || (chatListVisible && overlay == Overlay.None),
             drawerContent = {
                 ModalDrawerSheet(
-                    drawerContainerColor = colors.panel,
+                    drawerContainerColor = Color.Transparent,
                     drawerContentColor = colors.text,
-                    drawerShape = RectangleShape,
+                    drawerShape = GlassShape.Sheet,
+                    modifier = Modifier.glass(colors, GlassShape.Sheet, raised = true),
                 ) {
                     DrawerContent(
                         profile = state.profile,
@@ -329,6 +329,7 @@ private fun OverlayScreen(visible: Boolean, content: @Composable () -> Unit) {
         enter = slideInHorizontally { it / 3 } + fadeIn(),
         exit = slideOutHorizontally { it / 3 } + fadeOut(),
     ) {
-        Box(Modifier.fillMaxSize().background(Telegram.colors.window)) { content() }
+        // Полноэкранный раздел — тоже слой стекла: сияние фона продолжает просвечивать.
+        AuroraBackground(Modifier.fillMaxSize()) { content() }
     }
 }

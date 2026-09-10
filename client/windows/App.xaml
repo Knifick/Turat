@@ -44,6 +44,12 @@
             <SolidColorBrush x:Key="TgRowActive" Color="#572832" />
             <SolidColorBrush x:Key="TgRowHover" Color="#262626" />
             <SolidColorBrush x:Key="TgSelection" Color="#40C9354A" />
+            <!-- Кромка стекла: светлый блик сверху и тень снизу задают его толщину. -->
+            <!-- Полноэкранные разделы лежат поверх самого приложения, а не поверх рабочего
+                 стола: сквозь них не должен читаться список чатов. -->
+            <SolidColorBrush x:Key="TgOverlay" Color="#F21C1C1C" />
+            <SolidColorBrush x:Key="TgGlassRim" Color="#29FFFFFF" />
+            <SolidColorBrush x:Key="TgGlassEdge" Color="#33000000" />
             <LinearGradientBrush x:Key="TgWallpaper" StartPoint="0,0" EndPoint="0,1">
                 <GradientStop Color="#1C1C1C" Offset="0" />
                 <GradientStop Color="#211B1C" Offset="1" />
@@ -54,7 +60,7 @@
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="BorderThickness" Value="0" />
                 <Setter Property="Padding" Value="8" />
-                <Setter Property="CornerRadius" Value="8" />
+                <Setter Property="CornerRadius" Value="10" />
                 <Setter Property="Foreground" Value="{ThemeResource TgHint}" />
                 <Setter Property="Template">
                     <Setter.Value>
@@ -136,17 +142,17 @@
                 </Setter>
             </Style>
 
-            <!-- Строка чата во всю ширину: активная строка залита, без «пилюли» WinUI. -->
+            <!-- Строка чата — стеклянная карточка: активная светлеет и получает кромку. -->
             <Style x:Key="TgChatItem" TargetType="ListViewItem">
                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
                 <Setter Property="VerticalContentAlignment" Value="Stretch" />
                 <Setter Property="Padding" Value="0" />
-                <Setter Property="Margin" Value="0" />
+                <Setter Property="Margin" Value="6,2" />
                 <Setter Property="MinHeight" Value="0" />
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="ListViewItem">
-                            <Grid x:Name="Root" Background="Transparent">
+                            <Grid x:Name="Root" Background="Transparent" CornerRadius="16">
                                 <VisualStateManager.VisualStateGroups>
                                     <VisualStateGroup x:Name="CommonStates">
                                         <VisualState x:Name="Normal" />

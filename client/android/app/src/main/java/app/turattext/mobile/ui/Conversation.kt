@@ -128,12 +128,7 @@ fun ConversationPane(
     val colors = Telegram.colors
     val contact = state.selectedContact
     if (contact == null) {
-        Box(
-            modifier
-                .fillMaxSize()
-                .background(Brush.verticalGradient(listOf(colors.chatTop, colors.chatBottom))),
-            contentAlignment = Alignment.Center,
-        ) {
+        Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             ServicePill("Выберите, кому написать")
         }
         return
@@ -195,8 +190,11 @@ fun ConversationPane(
         scope.launch { if (feed.isNotEmpty()) listState.animateScrollToItem(feed.lastIndex) }
     }
 
-    Column(modifier.fillMaxSize().background(colors.chatBottom)) {
-        Column(Modifier.background(colors.panel).statusBarsPadding()) {
+    Column(
+        modifier.fillMaxSize()
+            .background(Brush.verticalGradient(listOf(colors.chatTop.copy(alpha = 0.55f), colors.chatBottom))),
+    ) {
+        Column(Modifier.glass(colors, GlassShape.Header, raised = true).statusBarsPadding()) {
             if (selected.isEmpty()) {
                 ConversationHeader(
                     contact = contact,
@@ -233,12 +231,8 @@ fun ConversationPane(
                 )
             }
         }
-        HorizontalDivider(color = colors.divider, thickness = 1.dp)
 
-        Box(
-            Modifier.weight(1f).fillMaxWidth()
-                .background(Brush.verticalGradient(listOf(colors.chatTop, colors.chatBottom))),
-        ) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
             if (feed.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     ServicePill(
@@ -295,7 +289,7 @@ fun ConversationPane(
                 onReject = { actions.rejectContact(contact.userId) },
             )
         } else {
-            Column(Modifier.background(colors.panel).imePadding()) {
+            Column(Modifier.glass(colors, GlassShape.Footer, raised = true).imePadding()) {
                 val replied = replyToId?.let(messageById::get)
                 if (editingId != null) {
                     ComposerBanner(
@@ -334,7 +328,9 @@ private fun ScrollDownButton(visible: Boolean, onClick: () -> Unit, modifier: Mo
         exit = fadeOut() + scaleOut(),
     ) {
         Box(
-            Modifier.size(42.dp).clip(CircleShape).background(colors.panel).clickable(onClick = onClick),
+            Modifier.size(44.dp).clip(CircleShape)
+                .glass(colors, CircleShape, raised = true)
+                .clickable(onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Icon(painterResource(R.drawable.ic_arrow_down), "Вниз", Modifier.size(20.dp), colors.hint)
@@ -595,9 +591,10 @@ private fun MessageBubble(
 ) {
     val colors = Telegram.colors
     val outgoing = message.outgoing
-    val big = 14.dp
-    val small = 5.dp
-    val tail = 4.dp
+    // Liquid Glass: пузыри скруглены крупнее, «хвост» остаётся заметно острее остальных углов.
+    val big = 20.dp
+    val small = 7.dp
+    val tail = 5.dp
     val shape = if (outgoing) {
         RoundedCornerShape(
             topStart = big,
@@ -626,12 +623,21 @@ private fun MessageBubble(
         34f + (if (message.edited) 26f else 0f) + (if (outgoing) 20f else 0f)
         ).sp
 
+    // Входящий пузырь — стекло, исходящий — акцент под тем же бликом: оба слоя пропускают фон.
+    val bubbleFill = if (outgoing) {
+        Brush.verticalGradient(
+            listOf(colors.bubbleOut.copy(alpha = 0.94f), colors.bubbleOut.copy(alpha = 0.82f)),
+        )
+    } else {
+        Brush.verticalGradient(listOf(colors.glassRaised, colors.glassBubble))
+    }
     Box(
         modifier
             .widthIn(max = 480.dp)
             .clip(shape)
-            .background(if (outgoing) colors.bubbleOut else colors.bubbleIn)
-            .padding(start = 10.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+            .background(bubbleFill)
+            .border(1.dp, colors.glassRim.copy(alpha = colors.glassRim.alpha * 0.7f), shape)
+            .padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
     ) {
         Column {
             message.forwardedFrom?.let { author ->
@@ -820,7 +826,10 @@ private fun Composer(
             Icon(painterResource(R.drawable.ic_attach), "Прикрепить файл", Modifier.size(22.dp), colors.hint)
         }
         Box(
-            Modifier.weight(1f).heightIn(min = 44.dp).padding(vertical = 2.dp),
+            Modifier.weight(1f).heightIn(min = 44.dp)
+                .clip(GlassShape.Capsule)
+                .glass(colors, GlassShape.Capsule)
+                .padding(horizontal = 14.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
             if (draft.isEmpty()) {
@@ -841,7 +850,10 @@ private fun Composer(
             exit = scaleOut() + fadeOut(),
         ) {
             Box(
-                Modifier.size(44.dp).clip(CircleShape).background(colors.accent).clickable(onClick = onSend),
+                Modifier.size(44.dp).clip(CircleShape)
+                    .background(colors.accent.copy(alpha = 0.92f))
+                    .border(1.dp, colors.glassRim, CircleShape)
+                    .clickable(onClick = onSend),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(painterResource(R.drawable.ic_send), "Отправить", Modifier.size(21.dp), colors.onAccent)
@@ -853,8 +865,7 @@ private fun Composer(
 @Composable
 private fun PendingBar(onAccept: () -> Unit, onReject: () -> Unit) {
     val colors = Telegram.colors
-    Column(Modifier.fillMaxWidth().background(colors.panel).navigationBarsPadding()) {
-        HorizontalDivider(color = colors.divider, thickness = 1.dp)
+    Column(Modifier.fillMaxWidth().glass(colors, GlassShape.Footer, raised = true).navigationBarsPadding()) {
         Text(
             "Этот пользователь хочет начать переписку",
             Modifier.fillMaxWidth().padding(top = 10.dp),

@@ -149,9 +149,9 @@ fun UnreadBadge(count: Int, background: Color = Telegram.colors.badge) {
 fun ServicePill(text: String, modifier: Modifier = Modifier) {
     Row(
         modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(Telegram.colors.servicePill)
-            .padding(horizontal = 11.dp, vertical = 5.dp),
+            .clip(GlassShape.Capsule)
+            .glass(Telegram.colors, GlassShape.Capsule, raised = true)
+            .padding(horizontal = 14.dp, vertical = 6.dp),
     ) {
         Text(text, color = Telegram.colors.serviceText, fontSize = 13.sp, fontWeight = FontWeight.Medium)
     }

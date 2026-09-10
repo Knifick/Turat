@@ -2,6 +2,7 @@ package app.turattext.mobile.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -27,7 +28,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -83,8 +83,12 @@ fun ChatListPane(
             chat.preview.contains(query, true)
     }
 
-    Column(modifier.background(colors.panel)) {
-        Column(Modifier.statusBarsPadding()) {
+    Column(modifier) {
+        // Шапка и поиск — верхний слой стекла над лентой чатов.
+        Column(
+            Modifier.glass(colors, GlassShape.Header, raised = true)
+                .statusBarsPadding(),
+        ) {
             Row(
                 Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -111,12 +115,11 @@ fun ChatListPane(
             SearchField(
                 value = query,
                 onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
             )
         }
-        HorizontalDivider(color = colors.divider, thickness = 1.dp)
 
-        Box(Modifier.weight(1f).fillMaxWidth().background(colors.window)) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
             val hits = if (searching) state.searchResults else emptyList()
             if (chats.isEmpty() && hits.isEmpty()) {
                 EmptyChats(searching || state.chats.isNotEmpty())
@@ -143,8 +146,9 @@ fun ChatListPane(
             }
             FloatingActionButton(
                 onClick = onNewChat,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).navigationBarsPadding(),
-                containerColor = colors.accent,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp).navigationBarsPadding()
+                    .border(1.dp, colors.glassRim, CircleShape),
+                containerColor = colors.accent.copy(alpha = 0.9f),
                 contentColor = colors.onAccent,
                 shape = CircleShape,
             ) {
@@ -176,7 +180,7 @@ private fun EmptyChats(searched: Boolean) {
 private fun ListSectionHeader(title: String) {
     Text(
         title,
-        Modifier.fillMaxWidth().background(Telegram.colors.panel).padding(horizontal = 16.dp, vertical = 7.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 9.dp),
         color = Telegram.colors.hint,
         fontSize = 13.sp,
         fontWeight = FontWeight.Medium,
@@ -187,8 +191,9 @@ private fun ListSectionHeader(title: String) {
 private fun SearchField(value: String, onValueChange: (String) -> Unit, modifier: Modifier = Modifier) {
     val colors = Telegram.colors
     Row(
-        modifier.height(40.dp).clip(RoundedCornerShape(20.dp)).background(colors.field)
-            .padding(horizontal = 12.dp),
+        modifier.height(42.dp).clip(GlassShape.Capsule)
+            .glass(colors, GlassShape.Capsule)
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(painterResource(R.drawable.ic_search), null, Modifier.size(18.dp), colors.hint)
@@ -220,12 +225,13 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
     val colors = Telegram.colors
     val contact = chat.contact
     var menu by remember { mutableStateOf(false) }
-    Box {
+    Box(Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
         Row(
             Modifier.fillMaxWidth()
-                .background(if (selected) colors.rowActive else Color.Transparent)
+                .clip(GlassShape.Card)
+                .then(if (selected) Modifier.glass(colors, GlassShape.Card, raised = true) else Modifier)
                 .combinedClickable(onClick = onClick, onLongClick = { menu = true })
-                .padding(start = 12.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
+                .padding(start = 10.dp, end = 12.dp, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Avatar(
@@ -234,7 +240,7 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
                 avatarBase64 = contact.avatarBase64,
                 size = 54.dp,
                 online = isOnline(contact),
-                onlineRing = if (selected) colors.rowActive else colors.window,
+                onlineRing = colors.window,
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {

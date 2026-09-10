@@ -110,8 +110,9 @@
                                            Hit="{StaticResource SearchHitTemplate}" />
 
             <DataTemplate x:Key="DaySeparatorTemplate" x:DataType="local:DaySeparator">
-                <Border HorizontalAlignment="Center" CornerRadius="14" Padding="11,4"
-                        Background="{ThemeResource TgServicePill}" Margin="0,10,0,6">
+                <Border HorizontalAlignment="Center" CornerRadius="16" Padding="14,5"
+                        Background="{ThemeResource TgServicePill}" Margin="0,10,0,6"
+                        BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                     <TextBlock Text="{x:Bind Label}" Foreground="{ThemeResource TgServiceText}" FontSize="12"
                                FontWeight="SemiBold" />
                 </Border>
@@ -119,8 +120,9 @@
 
             <DataTemplate x:Key="IncomingMessageTemplate" x:DataType="local:MessageModel">
                 <Grid Margin="{x:Bind RowMargin}" HorizontalAlignment="Stretch">
-                    <Border HorizontalAlignment="Left" MaxWidth="560" Padding="10,6,10,6"
+                    <Border HorizontalAlignment="Left" MaxWidth="560" Padding="12,7,12,7"
                             CornerRadius="{x:Bind BubbleCorners}" Background="{ThemeResource TgBubbleIn}"
+                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
                             ContextRequested="Message_ContextRequested">
                         <StackPanel>
                             <TextBlock Text="{x:Bind ForwardLabel}" Visibility="{x:Bind ForwardVisibility}"
@@ -170,8 +172,9 @@
 
             <DataTemplate x:Key="OutgoingMessageTemplate" x:DataType="local:MessageModel">
                 <Grid Margin="{x:Bind RowMargin}" HorizontalAlignment="Stretch">
-                    <Border HorizontalAlignment="Right" MaxWidth="560" Padding="10,6,10,6"
+                    <Border HorizontalAlignment="Right" MaxWidth="560" Padding="12,7,12,7"
                             CornerRadius="{x:Bind BubbleCorners}" Background="{ThemeResource TgBubbleOut}"
+                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
                             ContextRequested="Message_ContextRequested">
                         <StackPanel>
                             <TextBlock Text="{x:Bind ForwardLabel}" Visibility="{x:Bind ForwardVisibility}"
@@ -257,7 +260,7 @@
         </Grid.RowDefinitions>
 
         <!-- Своя полоса заголовка: как в Unigram, окно рисует её само. -->
-        <Border x:Name="TitleBar" Background="{ThemeResource TgPanel}">
+        <Border x:Name="TitleBar" Background="Transparent">
             <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center" Margin="10,0,0,0">
                 <Image Source="ms-appx:///Assets/Turat.png" Width="22" Height="22" Stretch="Uniform" />
                 <TextBlock Text="Turat" Foreground="{ThemeResource TgHint}" FontSize="12"
@@ -268,10 +271,11 @@
             </StackPanel>
         </Border>
 
-        <Grid Grid.Row="1" ColumnDefinitions="56,1,340,1,*">
+        <Grid Grid.Row="1" ColumnDefinitions="64,348,*" Padding="10,0,10,10" ColumnSpacing="10">
 
             <!-- Левый рельс Unigram: профиль сверху, служебные кнопки снизу. -->
-            <Grid Background="{ThemeResource TgRail}" RowDefinitions="Auto,*,Auto">
+            <Grid Background="{ThemeResource TgRail}" RowDefinitions="Auto,*,Auto"
+                  CornerRadius="20" BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                 <Button x:Name="ProfileButton" Style="{StaticResource TgIconButton}" Margin="0,10,0,0"
                         HorizontalAlignment="Center" Click="Settings_Click" ToolTipService.ToolTip="Мой профиль">
                     <Border Width="36" Height="36" CornerRadius="18" Background="{ThemeResource TgAccent}">
@@ -298,12 +302,12 @@
                 </StackPanel>
             </Grid>
 
-            <Border Grid.Column="1" Background="{ThemeResource TgDivider}" />
-
             <!-- Список чатов -->
-            <Grid Grid.Column="2" Background="{ThemeResource TgPanel}" RowDefinitions="Auto,Auto,*">
-                <Border Height="48" Padding="10,0" VerticalAlignment="Center">
-                    <Border CornerRadius="18" Background="{ThemeResource TgField}" Height="34" Padding="10,0">
+            <Grid Grid.Column="1" Background="{ThemeResource TgPanel}" RowDefinitions="Auto,*"
+                  CornerRadius="20" BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
+                <Border Height="52" Padding="10,0" VerticalAlignment="Center">
+                    <Border CornerRadius="18" Background="{ThemeResource TgField}" Height="36" Padding="12,0"
+                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                             <FontIcon Glyph="&#xE721;" FontSize="14" Foreground="{ThemeResource TgHint}"
                                       VerticalAlignment="Center" />
@@ -330,9 +334,7 @@
                     </Border>
                 </Border>
 
-                <Border Grid.Row="1" Height="1" Background="{ThemeResource TgDivider}" />
-
-                <Grid Grid.Row="2">
+                <Grid Grid.Row="1">
                     <ListView x:Name="ChatsList" SelectionMode="Single"
                               ItemContainerStyle="{StaticResource TgChatItem}"
                               ItemTemplateSelector="{StaticResource SidebarTemplateSelector}"
@@ -350,13 +352,13 @@
                 </Grid>
             </Grid>
 
-            <Border Grid.Column="3" Background="{ThemeResource TgDivider}" />
-
             <!-- Диалог -->
-            <Grid Grid.Column="4" Background="{ThemeResource TgWallpaper}"
-                  RowDefinitions="Auto,Auto,*,Auto,Auto">
+            <Grid Grid.Column="2" Background="{ThemeResource TgWallpaper}"
+                  RowDefinitions="Auto,Auto,*,Auto,Auto"
+                  CornerRadius="20" BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
 
-                <Grid x:Name="ConversationHeader" Height="56" Padding="14,0" Background="{ThemeResource TgPanel}"
+                <Grid x:Name="ConversationHeader" Height="60" Padding="14,0" Background="{ThemeResource TgPanel}"
+                      CornerRadius="20,20,0,0"
                       ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" Visibility="Collapsed">
                     <Grid Width="40" Height="40" Tapped="ContactProfile_Tapped">
                         <Border CornerRadius="20" Background="{ThemeResource TgAccent}">
@@ -388,7 +390,8 @@
                     </StackPanel>
                 </Grid>
 
-                <Grid x:Name="SelectionBar" Height="56" Padding="8,0" Background="{ThemeResource TgPanel}"
+                <Grid x:Name="SelectionBar" Height="60" Padding="8,0" Background="{ThemeResource TgPanel}"
+                      CornerRadius="20,20,0,0"
                       ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto" Visibility="Collapsed">
                     <Button Style="{StaticResource TgIconButton}" Click="ClearSelection_Click">
                         <FontIcon Glyph="&#xE711;" FontSize="15" />
@@ -451,7 +454,9 @@
                     </Grid>
                 </Border>
 
-                <Grid x:Name="Composer" Grid.Row="4" Padding="8" Background="{ThemeResource TgPanel}"
+                <Grid x:Name="Composer" Grid.Row="4" Padding="8" Margin="10,0,10,10"
+                      Background="{ThemeResource TgPanel}" CornerRadius="24"
+                      BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
                       ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Visibility="Collapsed">
                     <Button Style="{StaticResource TgIconButton}" Click="Attach_Click" VerticalAlignment="Bottom"
                             ToolTipService.ToolTip="Прикрепить файл">
@@ -482,6 +487,8 @@
                 </Grid>
 
                 <Grid x:Name="PendingBar" Grid.Row="4" Background="{ThemeResource TgPanel}" Padding="12"
+                      Margin="10,0,10,10" CornerRadius="24"
+                      BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
                       ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8" Visibility="Collapsed">
                     <TextBlock Text="Этот пользователь хочет начать переписку" VerticalAlignment="Center"
                                Foreground="{ThemeResource TgHint}" FontSize="13" />
@@ -495,7 +502,7 @@
         </Grid>
 
         <!-- Полноэкранные разделы поверх окна: настройки и профиль собеседника. -->
-        <Grid x:Name="SettingsPage" Grid.Row="1" Background="{ThemeResource TgWindow}" Visibility="Collapsed"
+        <Grid x:Name="SettingsPage" Grid.Row="1" Background="{ThemeResource TgOverlay}" Visibility="Collapsed"
               RowDefinitions="Auto,*">
             <Grid Height="56" Padding="10,0" Background="{ThemeResource TgPanel}" ColumnDefinitions="Auto,*"
                   ColumnSpacing="8">
@@ -597,7 +604,7 @@
             </ScrollViewer>
         </Grid>
 
-        <Grid x:Name="ProfilePage" Grid.Row="1" Background="{ThemeResource TgWindow}" Visibility="Collapsed"
+        <Grid x:Name="ProfilePage" Grid.Row="1" Background="{ThemeResource TgOverlay}" Visibility="Collapsed"
               RowDefinitions="Auto,*">
             <Grid Height="56" Padding="10,0" Background="{ThemeResource TgPanel}" ColumnDefinitions="Auto,*"
                   ColumnSpacing="8">

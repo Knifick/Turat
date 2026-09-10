@@ -62,6 +62,16 @@ public sealed partial class MainWindow : Window
 
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleBar);
+        // Liquid Glass: за полупрозрачными панелями приложения лежит системный acrylic, поэтому
+        // сквозь них видно и размытый рабочий стол, и слои самого окна.
+        try
+        {
+            SystemBackdrop = new DesktopAcrylicBackdrop();
+        }
+        catch
+        {
+            // На сборках без поддержки backdrop окно останется с обычной заливкой темы.
+        }
         try
         {
             AppWindow.Resize(new SizeInt32(1240, 820));

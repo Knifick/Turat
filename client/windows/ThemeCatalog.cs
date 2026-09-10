@@ -202,22 +202,29 @@ internal static class ThemeCatalog
     public static Color ToColor(uint value) => Color.FromArgb(
         (byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte)value);
 
+    /// <summary>
+    /// Liquid Glass: поверхности приложения полупрозрачны, а за ними лежит системный acrylic.
+    /// Прозрачность выводится здесь, а не хранится в каталоге, поэтому каждая тема получает
+    /// стекло сама и её цвета остаются понятными.
+    /// </summary>
+    private static uint Glass(uint color, byte alpha) => (color & 0x00FFFFFFu) | ((uint)alpha << 24);
+
     public static void Apply(ThemePalette theme)
     {
         ResourceDictionary resources = Application.Current.Resources;
-        Set(resources, "TgWindow", theme.Window);
-        Set(resources, "TgPanel", theme.Panel);
-        Set(resources, "TgRail", theme.Rail);
-        Set(resources, "TgElevated", theme.Elevated);
-        Set(resources, "TgField", theme.Field);
+        Set(resources, "TgWindow", Glass(theme.Window, 0x59));
+        Set(resources, "TgPanel", Glass(theme.Panel, 0x8C));
+        Set(resources, "TgRail", Glass(theme.Rail, 0x73));
+        Set(resources, "TgElevated", Glass(theme.Elevated, 0x99));
+        Set(resources, "TgField", Glass(theme.Field, 0x8C));
         Set(resources, "TgDivider", theme.Divider);
         Set(resources, "TgText", theme.Text);
         Set(resources, "TgHint", theme.Hint);
         Set(resources, "TgAccent", theme.Accent);
         Set(resources, "TgOnAccent", theme.OnAccent);
         Set(resources, "TgAccentSoft", theme.AccentSoft);
-        Set(resources, "TgBubbleIn", theme.BubbleIn);
-        Set(resources, "TgBubbleOut", theme.BubbleOut);
+        Set(resources, "TgBubbleIn", Glass(theme.BubbleIn, 0xA6));
+        Set(resources, "TgBubbleOut", Glass(theme.BubbleOut, 0xEB));
         Set(resources, "TgBubbleInText", theme.BubbleInText);
         Set(resources, "TgBubbleOutText", theme.BubbleOutText);
         Set(resources, "TgMetaIn", theme.MetaIn);
@@ -232,15 +239,18 @@ internal static class ThemeCatalog
         Set(resources, "TgBadgeText", theme.BadgeText);
         Set(resources, "TgOnline", theme.Online);
         Set(resources, "TgDanger", theme.Danger);
-        Set(resources, "TgRowActive", theme.RowActive);
-        Set(resources, "TgRowHover", theme.RowHover);
+        Set(resources, "TgRowActive", Glass(theme.RowActive, 0xB3));
+        Set(resources, "TgRowHover", Glass(theme.RowHover, 0x8C));
         Set(resources, "TgSelection", theme.Selection);
+        Set(resources, "TgOverlay", Glass(theme.Window, 0xF2));
+        Set(resources, "TgGlassRim", theme.Dark ? 0x29FFFFFFu : 0xB3FFFFFFu);
+        Set(resources, "TgGlassEdge", theme.Dark ? 0x33000000u : 0x14000000u);
 
         if (resources.TryGetValue("TgWallpaper", out object? wallpaper)
             && wallpaper is LinearGradientBrush { GradientStops.Count: 2 } gradient)
         {
-            gradient.GradientStops[0].Color = ToColor(theme.WallpaperTop);
-            gradient.GradientStops[1].Color = ToColor(theme.WallpaperBottom);
+            gradient.GradientStops[0].Color = ToColor(Glass(theme.WallpaperTop, 0x4D));
+            gradient.GradientStops[1].Color = ToColor(Glass(theme.WallpaperBottom, 0x80));
         }
     }
 
