@@ -1,0 +1,14 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:TuratText.Client.ViewModels"
+        x:Class="TuratText.Client.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="TuratText"
+        Icon="avares://TuratText.Client/Assets/TuratTexticon.png"
+        Width="1180"
+        Height="760"
+        MinWidth="380"
+        MinHeight="520"
+        Background="{StaticResource AppBackground}">
+  <ContentControl Content="{Binding CurrentViewModel}" />
+</Window>

@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: turattext
+      POSTGRES_USER: turattext
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turattext -d turattext"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  node:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/turattext
+      DATABASE_USERNAME: turattext
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      TURATTEXT_V2_ONLY: "true"
+      TURATTEXT_SERVER_NAME: ${TURATTEXT_SERVER_NAME:-TuratText Node}
+      TURATTEXT_SERVER_BASE_URL: https://${TURATTEXT_DOMAIN}
+      TURATTEXT_V2_NODE_IDENTITY_FILE: /app/data/node-identity-v2.json
+      TURATTEXT_V2_REGISTRATION_POW_BITS: ${TURATTEXT_V2_REGISTRATION_POW_BITS:-18}
+      TURATTEXT_V2_ENVELOPE_POW_BITS: ${TURATTEXT_V2_ENVELOPE_POW_BITS:-10}
+      TURATTEXT_V2_CONTACT_POW_BITS: ${TURATTEXT_V2_CONTACT_POW_BITS:-18}
+      TURATTEXT_V2_CONTACT_MAX_ENVELOPE_BYTES: ${TURATTEXT_V2_CONTACT_MAX_ENVELOPE_BYTES:-65536}
+      TURATTEXT_V2_CONTACT_MAX_ENVELOPES: ${TURATTEXT_V2_CONTACT_MAX_ENVELOPES:-64}
+      TURATTEXT_V2_REQUESTS_PER_MINUTE: ${TURATTEXT_V2_REQUESTS_PER_MINUTE:-1200}
+      TURATTEXT_V2_TRUST_FORWARDED_FOR: "true"
+      TURATTEXT_BACKUP_ENABLED: "false"
+      TURATTEXT_ADMIN_PASSWORD: ""
+    volumes:
+      - node-data:/app/data
+    expose: ["8080"]
+    networks: [backend]
+    security_opt: ["no-new-privileges:true"]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on: [node]
+    environment:
+      TURATTEXT_DOMAIN: ${TURATTEXT_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./updates:/srv/updates:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [backend]
+
+volumes:
+  postgres-data:
+  node-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  backend:
+    driver: bridge

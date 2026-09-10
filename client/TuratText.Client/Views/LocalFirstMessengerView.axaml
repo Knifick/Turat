@@ -1,0 +1,680 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:TuratText.Client.ViewModels"
+             xmlns:msg="clr-namespace:TuratText.Client.Messaging.V2"
+             xmlns:ui="clr-namespace:TuratText.Client.Ui"
+             xmlns:ctl="clr-namespace:TuratText.Client.Controls"
+             x:Class="TuratText.Client.Views.LocalFirstMessengerView"
+             x:DataType="vm:LocalFirstMessengerViewModel"
+             ClipToBounds="True">
+
+  <UserControl.Styles>
+    <!-- Avalonia's Transparent is #00FFFFFF, so fading from it flashes white. Every state uses the
+         same hue at a different alpha instead, which keeps the crossfade neutral. -->
+    <Style Selector="Border.messageRow">
+      <Setter Property="Background" Value="#000E1828" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Padding" Value="4,1" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.16" Easing="LinearEasing" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.messageRow:pointerover">
+      <Setter Property="Background" Value="#CC0E1828" />
+    </Style>
+    <Style Selector="Border.messageRow.selected">
+      <Setter Property="Background" Value="#FF1B2942" />
+    </Style>
+    <Style Selector="Border.messageRow.selected:pointerover">
+      <Setter Property="Background" Value="#FF223252" />
+    </Style>
+
+    <Style Selector="Border.avatar">
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+
+    <Style Selector="Border.overlayCard">
+      <Setter Property="Background" Value="{StaticResource PanelBackground}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="24" />
+      <Setter Property="BoxShadow" Value="0 24 60 0 #99000000" />
+    </Style>
+  </UserControl.Styles>
+
+  <Grid>
+    <!-- ambient background -->
+    <Border Background="{StaticResource AppBackground}" />
+    <Border Background="{StaticResource AuroraGlowBrush}" IsHitTestVisible="False" />
+    <Border Background="{StaticResource AuroraGlowAltBrush}" IsHitTestVisible="False" />
+
+    <!-- everything below is inset by the system bars and, on phones, by the soft keyboard -->
+    <Border Name="InsetRoot" Padding="0">
+      <Grid Name="Shell" ColumnDefinitions="Auto,*">
+
+        <!-- ======================= Sidebar ======================= -->
+        <Border Grid.Column="0"
+                Name="Sidebar"
+                Width="{Binding SidebarWidth}"
+                IsVisible="{Binding ShowSidebar}"
+                Background="{StaticResource PanelBackground}"
+                BorderBrush="{StaticResource BorderBrushSoft}"
+                BorderThickness="0,0,1,0">
+          <Grid RowDefinitions="Auto,Auto,*,Auto">
+
+            <Grid Margin="16,14,10,6" ColumnDefinitions="Auto,*,Auto">
+              <Border Width="40" Height="40" CornerRadius="14" Background="{StaticResource AccentGradient}">
+                <TextBlock Text="T" Foreground="White" FontSize="19" FontWeight="Bold"
+                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+              <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,8,0" Spacing="2">
+                <TextBlock Text="TuratText" Classes="h1" FontSize="19" />
+                <StackPanel Orientation="Horizontal" Spacing="5">
+                  <Grid Width="13" Height="13" VerticalAlignment="Center" IsVisible="{Binding IsOnline}">
+                    <Border Width="13" Height="13" CornerRadius="7" Background="#383DDC97" />
+                    <Border Width="7" Height="7" CornerRadius="4" Background="{StaticResource SuccessBrush}" />
+                  </Grid>
+                  <Grid Width="13" Height="13" VerticalAlignment="Center" IsVisible="{Binding !IsOnline}">
+                    <Border Width="13" Height="13" CornerRadius="7" Background="#38FFC061" />
+                    <Border Width="7" Height="7" CornerRadius="4" Background="{StaticResource WarnBrush}" />
+                  </Grid>
+                  <TextBlock Text="{Binding ConnectionLabel}" Classes="caption" FontSize="11"
+                             TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </StackPanel>
+              <Button Grid.Column="2" Classes="icon" Command="{Binding OpenSettingsCommand}"
+                      ToolTip.Tip="Настройки">
+                <Path Classes="glyph" Data="{StaticResource IconSettings}" />
+              </Button>
+            </Grid>
+
+            <Grid Grid.Row="1" Margin="14,4,14,10" ColumnDefinitions="*,Auto">
+              <Grid>
+                <TextBox Text="{Binding ContactQuery}" PlaceholderText="Поиск чатов" MinHeight="42"
+                         CornerRadius="21" Padding="42,9,16,9" FontSize="13" />
+                <Path Data="{StaticResource IconSearch}" Stretch="Uniform" Width="16" Height="16"
+                      Fill="{StaticResource FaintTextBrush}" IsHitTestVisible="False"
+                      HorizontalAlignment="Left" VerticalAlignment="Center" Margin="15,0,0,0" />
+              </Grid>
+              <Button Grid.Column="1" Classes="send" Width="42" Height="42" CornerRadius="21"
+                      Margin="8,0,0,0" Command="{Binding OpenNewContactCommand}"
+                      ToolTip.Tip="Новый диалог">
+                <Path Classes="glyph" Data="{StaticResource IconPlus}" Width="20" Height="20" />
+              </Button>
+            </Grid>
+
+            <Grid Grid.Row="2">
+              <ListBox Name="ContactsList"
+                       ItemsSource="{Binding VisibleContacts}"
+                       SelectedItem="{Binding SelectedContact}"
+                       IsVisible="{Binding HasVisibleContacts}"
+                       Padding="10,0,10,12"
+                       ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                <ListBox.ItemTemplate>
+                  <DataTemplate x:DataType="msg:LocalContact">
+                    <Grid ColumnDefinitions="Auto,*,Auto" Margin="10,10" ColumnSpacing="12">
+                      <Grid.ContextMenu>
+                        <ContextMenu>
+                          <MenuItem Header="Удалить чат"
+                                    Command="{Binding #ContactsList.((vm:LocalFirstMessengerViewModel)DataContext).DeleteChatCommand}"
+                                    CommandParameter="{Binding}" />
+                        </ContextMenu>
+                      </Grid.ContextMenu>
+                      <Border Width="46" Height="46" CornerRadius="17" Background="{Binding AvatarBrush}">
+                        <TextBlock Text="{Binding Initials}" Foreground="White" FontSize="18" FontWeight="Bold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                      </Border>
+                      <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="14.5"
+                                   TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding ConversationStatus}" Classes="caption" FontSize="12"
+                                   TextTrimming="CharacterEllipsis" />
+                      </StackPanel>
+                      <Border Grid.Column="2" VerticalAlignment="Center" CornerRadius="10" Padding="8,3"
+                              Background="{StaticResource AccentGradient}" IsVisible="{Binding PendingApproval}">
+                        <TextBlock Text="новый" Foreground="White" FontSize="10" FontWeight="SemiBold" />
+                      </Border>
+                    </Grid>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+
+              <StackPanel IsVisible="{Binding HasNoContacts}" Classes="riseIn"
+                          HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" Margin="28">
+                <Border Width="72" Height="72" CornerRadius="26" HorizontalAlignment="Center"
+                        Background="#131C2A" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1">
+                  <Path Data="{StaticResource IconSparkle}" Stretch="Uniform" Width="30" Height="30"
+                        Fill="{StaticResource AccentBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="Пока нет диалогов" Classes="h2" HorizontalAlignment="Center" />
+                <TextBlock Text="Найдите человека по username или UserID — история останется только на ваших устройствах."
+                           Classes="caption" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="260" />
+                <Button Classes="primary" Content="Начать диалог" Command="{Binding OpenNewContactCommand}"
+                        HorizontalAlignment="Center" Margin="0,4,0,0" />
+              </StackPanel>
+
+              <StackPanel IsVisible="{Binding HasNoSearchResults}" Classes="fadeIn"
+                          HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" Margin="28">
+                <TextBlock Text="Ничего не найдено" Classes="h2" HorizontalAlignment="Center" />
+                <TextBlock Text="Попробуйте другое имя или полный UserID" Classes="caption"
+                           TextWrapping="Wrap" TextAlignment="Center" />
+              </StackPanel>
+            </Grid>
+
+            <Border Grid.Row="3" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,1,0,0"
+                    Padding="16,10">
+              <TextBlock Text="{Binding StatusMessage}" Classes="caption" FontSize="10.5"
+                         TextWrapping="Wrap" MaxHeight="42" />
+            </Border>
+          </Grid>
+        </Border>
+
+        <!-- ======================= Conversation ======================= -->
+        <Grid Grid.Column="1" Name="ChatPane" IsVisible="{Binding ShowConversation}"
+              RowDefinitions="Auto,Auto,*,Auto,Auto">
+
+          <Border Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource BorderBrushSoft}"
+                  BorderThickness="0,0,0,1">
+            <Grid>
+              <Grid Margin="8,10" ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="4">
+                <Button Classes="icon" Command="{Binding BackToChatsCommand}"
+                        IsVisible="{Binding ShowBackButton}" ToolTip.Tip="К списку чатов">
+                  <Path Classes="glyph" Data="{StaticResource IconBack}" Width="22" Height="22" />
+                </Button>
+                <Border Grid.Column="1" Grid.ColumnSpan="2" Background="Transparent" Cursor="Hand"
+                        IsVisible="{Binding HasSelectedContact}" PointerPressed="ContactHeader_OnPointerPressed">
+                  <Grid ColumnDefinitions="Auto,*">
+                    <Border Width="42" Height="42" CornerRadius="16" Margin="4,0,0,0"
+                            Background="{Binding SelectedContact.AvatarBrush}">
+                      <TextBlock Text="{Binding SelectedContact.Initials}" Foreground="White" FontSize="17"
+                                 FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="12,0,8,0" Spacing="2">
+                      <TextBlock Text="{Binding SelectedContactTitle}" FontSize="15.5" FontWeight="SemiBold"
+                                 TextTrimming="CharacterEllipsis" />
+                      <TextBlock Text="{Binding SelectedContact.ConversationStatus}" FontSize="11.5"
+                                 Foreground="{StaticResource AccentWarmBrush}"
+                                 TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                  </Grid>
+                </Border>
+                <!-- Shows the open contact's own presence (from their heartbeats), not the local
+                     client's connectivity — that's ConnectionLabel, shown elsewhere. -->
+                <Border Grid.Column="3" Classes="pill" VerticalAlignment="Center" Margin="0,0,6,0"
+                        IsVisible="{Binding HasSelectedContactPresence}"
+                        ToolTip.Tip="Статус собеседника по последнему сигналу присутствия">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Grid Width="13" Height="13" VerticalAlignment="Center"
+                          IsVisible="{Binding SelectedContactPresenceOnline}">
+                      <Border Width="13" Height="13" CornerRadius="7" Background="#383DDC97" />
+                      <Border Width="7" Height="7" CornerRadius="4" Background="{StaticResource SuccessBrush}" />
+                    </Grid>
+                    <Grid Width="13" Height="13" VerticalAlignment="Center"
+                          IsVisible="{Binding !SelectedContactPresenceOnline}">
+                      <Border Width="13" Height="13" CornerRadius="7" Background="#38FFC061" />
+                      <Border Width="7" Height="7" CornerRadius="4" Background="{StaticResource WarnBrush}" />
+                    </Grid>
+                    <TextBlock Text="{Binding SelectedContactPresenceLabel}" Classes="caption" FontSize="11"
+                               VerticalAlignment="Center" />
+                  </StackPanel>
+                </Border>
+              </Grid>
+
+              <!-- Busy hairline. A looping animation here would repaint the whole window every frame
+                   (it cost ~26% of a core), so this is a plain bar that only appears while syncing. -->
+              <Border Height="2" VerticalAlignment="Bottom" IsHitTestVisible="False" Opacity="0.9"
+                      Background="{StaticResource AccentGradient}" IsVisible="{Binding IsBusy}" />
+            </Grid>
+          </Border>
+
+          <Border Grid.Row="1" Classes="fadeIn" IsVisible="{Binding SelectedContact.PendingApproval}"
+                  Background="#111C2C" BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,0,0,1"
+                  Padding="16,12">
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+              <StackPanel Spacing="3" VerticalAlignment="Center">
+                <TextBlock Text="Запрос на общение" FontWeight="SemiBold" FontSize="13.5" />
+                <TextBlock Text="Этот человек хочет начать защищённый диалог" Classes="caption" TextWrapping="Wrap" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Name="ApprovalActions" Orientation="Horizontal" Spacing="8"
+                          VerticalAlignment="Center" Margin="12,0,0,0">
+                <Button Classes="primary" Content="Принять" Command="{Binding AcceptContactCommand}" />
+                <Button Classes="ghost" Content="Отклонить" Command="{Binding RejectContactCommand}" />
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Grid Grid.Row="2">
+            <ScrollViewer Name="MessagesScroll" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          IsVisible="{Binding HasSelectedContact}">
+              <ItemsControl ItemsSource="{Binding MessageRows}" Margin="14,14,14,18">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate><VirtualizingStackPanel /></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="ui:MessageRow">
+                    <StackPanel Margin="{Binding RowMargin}">
+                      <Border IsVisible="{Binding ShowDateSeparator}" HorizontalAlignment="Center"
+                              Margin="0,14,0,10" CornerRadius="12" Padding="12,4" Background="#14202F">
+                        <TextBlock Text="{Binding DateLabel}" FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{StaticResource MutedTextBrush}" />
+                      </Border>
+
+                      <Border Classes="messageRow"
+                              PointerPressed="Message_OnPointerPressed"
+                              PointerMoved="Message_OnPointerMoved"
+                              PointerReleased="Message_OnPointerReleased"
+                              PointerCaptureLost="Message_OnPointerCaptureLost">
+                        <Border Classes="messageBubble"
+                                HorizontalAlignment="{Binding BubbleAlignment}"
+                                Background="{Binding BubbleBackground}"
+                                BorderBrush="{Binding BubbleBorder}"
+                                BorderThickness="1"
+                                CornerRadius="{Binding BubbleCornerRadius}"
+                                Padding="14,10"
+                                MaxWidth="580">
+                          <StackPanel Spacing="7">
+                            <Border IsVisible="{Binding HasImageThumbnail}" CornerRadius="12" ClipToBounds="True"
+                                    MaxWidth="320" MaxHeight="320" Cursor="Hand"
+                                    PointerPressed="ImageThumbnail_OnPointerPressed"
+                                    PointerMoved="ImageThumbnail_OnPointerMoved"
+                                    PointerReleased="ImageThumbnail_OnPointerReleased"
+                                    PointerCaptureLost="ImageThumbnail_OnPointerCaptureLost">
+                              <Image Source="{Binding ImageThumbnail}" Stretch="Uniform" />
+                            </Border>
+
+                            <Border IsVisible="{Binding ShowFileChip}" CornerRadius="12" Padding="11,9"
+                                    Background="{Binding AttachmentBackground}">
+                              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                                <Border Width="34" Height="34" CornerRadius="11" Background="#30FFFFFF">
+                                  <Path Data="{StaticResource IconFile}" Stretch="Uniform" Width="17" Height="17"
+                                        Fill="{Binding TextBrush}" HorizontalAlignment="Center"
+                                        VerticalAlignment="Center" />
+                                </Border>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="1">
+                                  <TextBlock Text="{Binding AttachmentName}" FontSize="13" FontWeight="SemiBold"
+                                             Foreground="{Binding TextBrush}" TextTrimming="CharacterEllipsis" />
+                                  <TextBlock Text="{Binding AttachmentSize}" FontSize="11"
+                                             Foreground="{Binding MetaBrush}" />
+                                </StackPanel>
+                              </Grid>
+                            </Border>
+
+                            <ctl:EmojiTextBlock EmojiText="{Binding BodyText}" IsVisible="{Binding ShowText}"
+                                                TextWrapping="Wrap" FontSize="14.5"
+                                                Foreground="{Binding TextBrush}" />
+
+                            <Border IsVisible="{Binding HasReactions}" HorizontalAlignment="Left"
+                                    CornerRadius="12" Padding="8,3" Background="#33FFFFFF">
+                              <ctl:EmojiTextBlock EmojiText="{Binding ReactionSummary}" FontSize="14" />
+                            </Border>
+
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="5">
+                              <TextBlock Text="изменено" FontSize="10" IsVisible="{Binding IsEdited}"
+                                         Foreground="{Binding MetaBrush}" />
+                              <TextBlock Text="{Binding TimeLabel}" FontSize="10.5"
+                                         Foreground="{Binding MetaBrush}" />
+                              <TextBlock Text="{Binding StateGlyph}" FontSize="10.5" IsVisible="{Binding ShowState}"
+                                         Foreground="{Binding StateBrush}" />
+                            </StackPanel>
+                          </StackPanel>
+                        </Border>
+                      </Border>
+                    </StackPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+
+            <!-- jump to newest -->
+            <Button Name="ScrollDownButton" Classes="icon popIn" Width="44" Height="44"
+                    HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,18,18"
+                    Background="{StaticResource PanelElevated}" BorderThickness="1"
+                    BorderBrush="{StaticResource BorderBrushStrong}"
+                    IsVisible="False" Click="ScrollDown_OnClick" ToolTip.Tip="К последним сообщениям">
+              <Path Classes="glyph" Data="{StaticResource IconChevronDown}" Width="22" Height="22" />
+            </Button>
+
+            <StackPanel IsVisible="{Binding HasNoSelectedContact}" Classes="riseIn"
+                        HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" Margin="30">
+              <Border Width="92" Height="92" CornerRadius="34" HorizontalAlignment="Center"
+                      Background="{StaticResource AccentGradient}" Opacity="0.9">
+                <Path Data="{StaticResource IconChat}" Stretch="Uniform" Width="40" Height="40" Fill="White"
+                      HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+              <TextBlock Text="Выберите диалог" FontSize="19" FontWeight="SemiBold" HorizontalAlignment="Center" />
+              <TextBlock Text="Сообщения шифруются на устройстве и никогда не покидают его в открытом виде."
+                         Classes="caption" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="320" />
+              <Button Classes="primary" Content="Новый диалог" Command="{Binding OpenNewContactCommand}"
+                      HorizontalAlignment="Center" Margin="0,4,0,0" />
+            </StackPanel>
+
+            <StackPanel IsVisible="{Binding HasNoMessages}" Classes="riseIn"
+                        HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10" Margin="30">
+              <Border Width="72" Height="72" CornerRadius="26" HorizontalAlignment="Center" Background="#131C2A"
+                      BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="1">
+                <Path Data="{StaticResource IconLock}" Stretch="Uniform" Width="28" Height="28"
+                      Fill="{StaticResource AccentTealBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+              <TextBlock Text="Начните переписку" FontSize="18" FontWeight="SemiBold" HorizontalAlignment="Center" />
+              <TextBlock Text="Сообщения защищены сквозным шифрованием" Classes="caption"
+                         TextAlignment="Center" TextWrapping="Wrap" />
+            </StackPanel>
+          </Grid>
+
+          <!-- selection actions -->
+          <Border Grid.Row="3" Classes="riseIn" IsVisible="{Binding HasSelectedActions}"
+                  Background="{StaticResource PanelBackground}" BorderBrush="{StaticResource BorderBrushSoft}"
+                  BorderThickness="0,1,0,0" Padding="12,9">
+            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+              <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
+                <TextBlock Text="{Binding SelectedMessageCountLabel}" Classes="caption" VerticalAlignment="Center"
+                           Margin="4,0,6,0" />
+                <Button Classes="chip" Content="Снять" Command="{Binding ClearMessageSelectionCommand}" />
+                <Button Classes="chip" Content="{Binding CopySelectionLabel}"
+                        IsVisible="{Binding CanCopySelectedMessages}" Click="CopySelection_OnClick" />
+                <Button Classes="chip" Content="Скачать" IsVisible="{Binding HasSelectedAttachment}"
+                        Click="DownloadAttachment_OnClick" />
+                <Button Classes="chip" Content="{Binding ReactSelectionLabel}"
+                        IsVisible="{Binding CanReactSelectedMessage}" Command="{Binding ReactCommand}" />
+                <Button Classes="chip" Content="Изменить" IsVisible="{Binding CanModifySelectedMessage}"
+                        Command="{Binding BeginEditCommand}" />
+                <Button Classes="chip danger" Content="{Binding DeleteSelectionLabel}"
+                        IsVisible="{Binding CanDeleteSelectedMessages}" Command="{Binding DeleteCommand}" />
+              </StackPanel>
+            </ScrollViewer>
+          </Border>
+
+          <!-- composer -->
+          <Border Grid.Row="4" Name="Composer" Background="{StaticResource PanelBackground}"
+                  BorderBrush="{StaticResource BorderBrushSoft}" BorderThickness="0,1,0,0"
+                  IsVisible="{Binding HasSelectedContact}" Padding="10,10,10,12">
+            <StackPanel Spacing="8">
+              <Border Classes="fadeIn" IsVisible="{Binding IsEditing}" CornerRadius="12" Padding="12,8"
+                      Background="#141D2B" BorderBrush="{StaticResource AccentBrush}" BorderThickness="3,0,0,0">
+                <Grid ColumnDefinitions="*,Auto">
+                  <StackPanel Spacing="1">
+                    <TextBlock Text="Редактирование сообщения" FontSize="11" FontWeight="SemiBold"
+                               Foreground="{StaticResource AccentWarmBrush}" />
+                    <TextBlock Text="{Binding EditingPreview}" Classes="caption" FontSize="11.5"
+                               TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+                  <Button Grid.Column="1" Classes="icon" Width="30" Height="30" Command="{Binding CancelEditCommand}">
+                    <Path Classes="glyph" Data="{StaticResource IconClose}" Width="14" Height="14" />
+                  </Button>
+                </Grid>
+              </Border>
+
+              <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                <Button Classes="icon" Width="44" Height="46" CornerRadius="16"
+                        Click="PickAttachment_OnClick" ToolTip.Tip="Прикрепить файл" VerticalAlignment="Bottom">
+                  <Path Classes="glyph" Data="{StaticResource IconAttach}" Width="20" Height="20" />
+                </Button>
+                <TextBox Grid.Column="1" Name="ComposerInput" Text="{Binding NewMessage}"
+                         PlaceholderText="Сообщение" AcceptsReturn="True" TextWrapping="Wrap"
+                         MinHeight="46" MaxHeight="140" CornerRadius="20" Padding="16,12"
+                         VerticalContentAlignment="Center"
+                         KeyDown="Composer_OnKeyDown" />
+                <Button Grid.Column="2" Classes="send" Command="{Binding SubmitComposerCommand}"
+                        IsEnabled="{Binding CanSend}" VerticalAlignment="Bottom" ToolTip.Tip="Отправить">
+                  <Path Classes="glyph" Data="{StaticResource IconSend}" Width="19" Height="19"
+                        Margin="2,0,0,0" />
+                </Button>
+              </Grid>
+            </StackPanel>
+          </Border>
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- ======================= New contact ======================= -->
+    <Border IsVisible="{Binding IsNewContactOpen}" Classes="fadeIn" Background="#D6060910" ZIndex="100"
+            PointerPressed="Scrim_OnPointerPressed">
+      <Border Classes="overlayCard popIn" MaxWidth="480" HorizontalAlignment="Center" VerticalAlignment="Center"
+              Margin="18" Padding="24">
+        <StackPanel Spacing="16">
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel Spacing="3">
+              <TextBlock Text="Новый диалог" Classes="h1" />
+              <TextBlock Text="Найдите человека в TuratText" Classes="caption" />
+            </StackPanel>
+            <Button Grid.Column="1" Classes="icon" Command="{Binding CloseOverlayCommand}">
+              <Path Classes="glyph" Data="{StaticResource IconClose}" Width="16" Height="16" />
+            </Button>
+          </Grid>
+          <TextBox PlaceholderText="@username или полный UserID" Text="{Binding NewContactUserId}" />
+          <TextBlock Text="Имя в списке чатов подставится автоматически из профиля собеседника." Classes="caption"
+                     TextWrapping="Wrap" />
+          <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource AccentWarmBrush}" FontSize="12"
+                     TextWrapping="Wrap" />
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+            <Button Classes="ghost" Content="Отмена" Command="{Binding CloseOverlayCommand}"
+                    HorizontalAlignment="Left" />
+            <Button Grid.Column="1" Classes="primary" Content="Начать диалог" Command="{Binding AddContactCommand}" />
+          </Grid>
+        </StackPanel>
+      </Border>
+    </Border>
+
+    <!-- ======================= Settings ======================= -->
+    <Border IsVisible="{Binding IsSettingsOpen}" Classes="fadeIn" Background="#EE060910" ZIndex="110">
+      <Border Classes="overlayCard popIn" MaxWidth="720" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+              Margin="16">
+        <Grid RowDefinitions="Auto,*,Auto">
+          <Grid Margin="24,20,16,10" ColumnDefinitions="*,Auto">
+            <StackPanel Spacing="3">
+              <TextBlock Text="Настройки" Classes="h1" />
+              <TextBlock Text="Профиль, сеть и устройства" Classes="caption" />
+            </StackPanel>
+            <Button Grid.Column="1" Classes="icon" Command="{Binding CloseOverlayCommand}">
+              <Path Classes="glyph" Data="{StaticResource IconClose}" Width="16" Height="16" />
+            </Button>
+          </Grid>
+
+          <ScrollViewer Grid.Row="1" Padding="24,4,24,16">
+            <StackPanel Spacing="14">
+              <Border Classes="card" Padding="18">
+                <StackPanel Spacing="12">
+                  <TextBlock Text="Профиль" Classes="h2" />
+                  <Border CornerRadius="12" Padding="12,10" Background="#0D1620">
+                    <StackPanel Spacing="4">
+                      <TextBlock Text="Ваш UserID" Classes="caption" FontSize="10.5" />
+                      <TextBlock Text="{Binding UserId}" Classes="mono" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </Border>
+                  <TextBox PlaceholderText="Ваш username" Text="{Binding MyUsername}" />
+                  <Button Classes="ghost" Content="Опубликовать username"
+                          Command="{Binding PublishUsernameCommand}" HorizontalAlignment="Left" />
+
+                  <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14" Margin="0,6,0,0">
+                    <Border Width="64" Height="64" CornerRadius="22" ClipToBounds="True"
+                            Background="{StaticResource AccentGradient}">
+                      <Panel>
+                        <TextBlock Text="{Binding UserIdShort}" IsVisible="{Binding !HasProfileAvatarPreview}"
+                                   Foreground="White" FontSize="12" FontWeight="Bold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        <Image Source="{Binding ProfileAvatarPreview}" IsVisible="{Binding HasProfileAvatarPreview}"
+                               Stretch="UniformToFill" Width="64" Height="64" />
+                      </Panel>
+                    </Border>
+                    <StackPanel Grid.Column="1" Spacing="8" VerticalAlignment="Center">
+                      <TextBox PlaceholderText="Видимое имя" Text="{Binding ProfileDisplayName}" />
+                      <Button Classes="ghost" Content="Выбрать аватар" Click="PickAvatar_OnClick"
+                              HorizontalAlignment="Left" />
+                    </StackPanel>
+                  </Grid>
+                  <TextBox PlaceholderText="О себе" Text="{Binding ProfileAbout}" AcceptsReturn="True"
+                           TextWrapping="Wrap" MinHeight="64" MaxLength="200" />
+                  <Button Classes="primary" Content="Сохранить профиль" Command="{Binding SaveProfileCommand}"
+                          HorizontalAlignment="Left" />
+                </StackPanel>
+              </Border>
+
+              <Expander Header="Сеть и приватность">
+                <StackPanel Spacing="10" Margin="0,10,0,4">
+                  <TextBox PlaceholderText="Адрес Mailbox Node" Text="{Binding BootstrapUrl}" />
+                  <WrapPanel>
+                    <Button Classes="ghost" Content="Синхронизировать сейчас" Command="{Binding RefreshCommand}"
+                            Margin="0,0,8,8" />
+                    <Button Classes="ghost" Content="Подключить Node" Command="{Binding ConnectCommand}"
+                            Margin="0,0,8,8" />
+                    <Button Classes="ghost" Content="Проверить обновление" Command="{Binding CheckUpdateCommand}"
+                            Margin="0,0,8,8" />
+                    <Button Classes="ghost" Content="{Binding MetadataProtectionLabel}"
+                            Command="{Binding CycleMetadataModeCommand}" Margin="0,0,8,8" />
+                  </WrapPanel>
+                </StackPanel>
+              </Expander>
+
+              <Expander Header="Устройства и резервные копии">
+                <StackPanel Spacing="10" Margin="0,10,0,4">
+                  <TextBox PasswordChar="●" PlaceholderText="Пароль резервной копии" Text="{Binding SecurityPassphrase}" />
+                  <WrapPanel>
+                    <Button Classes="ghost" Content="Создать backup" Click="CreateBackup_OnClick" Margin="0,0,8,8" />
+                    <Button Classes="ghost" Content="Восстановить backup" Click="RestoreBackup_OnClick" Margin="0,0,8,8" />
+                    <Button Classes="ghost" Content="Связать устройство" Click="CreateDeviceLink_OnClick" Margin="0,0,8,8" />
+                    <Button Classes="ghost" Content="Импортировать связь" Click="ImportDeviceLink_OnClick" Margin="0,0,8,8" />
+                  </WrapPanel>
+                  <TextBox PlaceholderText="DeviceID потерянного устройства" Text="{Binding RevokeDeviceId}" />
+                  <Button Classes="danger" Content="Отозвать устройство" Command="{Binding RevokeDeviceCommand}"
+                          HorizontalAlignment="Left" />
+                </StackPanel>
+              </Expander>
+
+              <Expander Header="Передача без прямого подключения">
+                <WrapPanel Margin="0,10,0,4">
+                  <Button Classes="ghost" Content="Экспорт сообщений" Click="ExportMesh_OnClick" Margin="0,0,8,8" />
+                  <Button Classes="ghost" Content="Доставить пакет" Click="ForwardMesh_OnClick" Margin="0,0,8,8" />
+                  <Button Classes="ghost" Content="Экспорт сети" Click="ExportDiscovery_OnClick" Margin="0,0,8,8" />
+                  <Button Classes="ghost" Content="Импорт сети" Click="ImportDiscovery_OnClick" Margin="0,0,8,8" />
+                </WrapPanel>
+              </Expander>
+
+              <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource AccentWarmBrush}"
+                         FontSize="12" TextWrapping="Wrap" />
+            </StackPanel>
+          </ScrollViewer>
+
+          <Button Grid.Row="2" Classes="primary" Content="Готово" Command="{Binding CloseOverlayCommand}"
+                  Height="48" Margin="24,8,24,20" />
+        </Grid>
+      </Border>
+    </Border>
+
+    <!-- ======================= First-run onboarding ======================= -->
+    <Border IsVisible="{Binding IsOnboardingOpen}" Classes="fadeIn" Background="#F2060910" ZIndex="200">
+      <Border Classes="overlayCard popIn" MaxWidth="480" HorizontalAlignment="Center" VerticalAlignment="Center"
+              Margin="18" Padding="24">
+        <StackPanel Spacing="16">
+          <StackPanel Spacing="3">
+            <TextBlock Text="Добро пожаловать в TuratText" Classes="h1" />
+            <TextBlock Text="Придумайте username и видимое имя — их увидят ваши собеседники."
+                       Classes="caption" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border Width="84" Height="84" CornerRadius="30" ClipToBounds="True" HorizontalAlignment="Center"
+                  Background="{StaticResource AccentGradient}">
+            <Panel>
+              <Path Data="{StaticResource IconSparkle}" Stretch="Uniform" Width="32" Height="32" Fill="White"
+                    IsVisible="{Binding !HasProfileAvatarPreview}"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" />
+              <Image Source="{Binding ProfileAvatarPreview}" IsVisible="{Binding HasProfileAvatarPreview}"
+                     Stretch="UniformToFill" Width="84" Height="84" />
+            </Panel>
+          </Border>
+          <Button Classes="ghost" Content="Выбрать аватар (необязательно)" Click="PickAvatar_OnClick"
+                  HorizontalAlignment="Center" />
+
+          <TextBox PlaceholderText="Username" Text="{Binding MyUsername}" />
+          <TextBox PlaceholderText="Видимое имя" Text="{Binding ProfileDisplayName}" />
+          <TextBlock Text="{Binding StatusMessage}" Foreground="{StaticResource AccentWarmBrush}" FontSize="12"
+                     TextWrapping="Wrap" />
+          <Button Classes="primary" Content="Готово" Command="{Binding CompleteOnboardingCommand}"
+                  HorizontalAlignment="Stretch" Height="46" />
+        </StackPanel>
+      </Border>
+    </Border>
+
+    <!-- ======================= Contact profile ======================= -->
+    <Border IsVisible="{Binding IsContactProfileOpen}" Classes="fadeIn" Background="#D6060910" ZIndex="120"
+            PointerPressed="Scrim_OnPointerPressed">
+      <Border Classes="overlayCard popIn" MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center"
+              Margin="18" Padding="24">
+        <StackPanel Spacing="16">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="Профиль" Classes="h1" />
+            <Button Grid.Column="1" Classes="icon" Command="{Binding CloseOverlayCommand}">
+              <Path Classes="glyph" Data="{StaticResource IconClose}" Width="16" Height="16" />
+            </Button>
+          </Grid>
+
+          <Border Width="96" Height="96" CornerRadius="34" ClipToBounds="True" HorizontalAlignment="Center"
+                  Background="{Binding SelectedContact.AvatarBrush}">
+            <Panel>
+              <TextBlock Text="{Binding SelectedContact.Initials}" IsVisible="{Binding !HasContactProfileAvatar}"
+                         Foreground="White" FontSize="28" FontWeight="Bold"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" />
+              <Image Source="{Binding ContactProfileAvatar}" IsVisible="{Binding HasContactProfileAvatar}"
+                     Stretch="UniformToFill" Width="96" Height="96" />
+            </Panel>
+          </Border>
+
+          <StackPanel Spacing="2" HorizontalAlignment="Center">
+            <TextBlock Text="{Binding SelectedContactTitle}" FontSize="19" FontWeight="SemiBold"
+                       HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding SelectedContact.ConversationStatus}" Classes="caption"
+                       HorizontalAlignment="Center" />
+          </StackPanel>
+
+          <Border CornerRadius="12" Padding="12,10" Background="#0D1620">
+            <StackPanel Spacing="4">
+              <TextBlock Text="UserID" Classes="caption" FontSize="10.5" />
+              <TextBlock Text="{Binding SelectedContact.UserId}" Classes="mono" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border CornerRadius="12" Padding="12,10" Background="#0D1620" IsVisible="{Binding HasContactProfileUsername}">
+            <StackPanel Spacing="4">
+              <TextBlock Text="Username" Classes="caption" FontSize="10.5" />
+              <TextBlock Text="{Binding ContactProfileUsername}" />
+            </StackPanel>
+          </Border>
+
+          <Border CornerRadius="12" Padding="12,10" Background="#0D1620" IsVisible="{Binding HasContactProfileAbout}">
+            <StackPanel Spacing="4">
+              <TextBlock Text="О себе" Classes="caption" FontSize="10.5" />
+              <TextBlock Text="{Binding ContactProfileAbout}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </Border>
+    </Border>
+
+    <!-- ======================= Media lightbox ======================= -->
+    <Border IsVisible="{Binding IsLightboxOpen}" Classes="fadeIn" Background="#F2000000" ZIndex="300"
+            PointerPressed="Scrim_OnPointerPressed">
+      <Grid>
+        <Image Source="{Binding LightboxImage}" Stretch="Uniform" Margin="60,40"
+               PointerPressed="LightboxImage_OnPointerPressed"
+               PointerReleased="LightboxImage_OnPointerReleased" />
+
+        <Button Classes="icon" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,14,14,0"
+                Command="{Binding CloseOverlayCommand}">
+          <Path Classes="glyph" Data="{StaticResource IconClose}" Width="18" Height="18" Fill="White" />
+        </Button>
+
+        <Button Classes="icon" Width="52" Height="52" HorizontalAlignment="Left" VerticalAlignment="Center"
+                Margin="14,0,0,0" IsVisible="{Binding LightboxHasPrev}" Command="{Binding LightboxPrevCommand}">
+          <Path Classes="glyph" Data="{StaticResource IconBack}" Width="24" Height="24" Fill="White" />
+        </Button>
+        <Button Classes="icon" Width="52" Height="52" HorizontalAlignment="Right" VerticalAlignment="Center"
+                Margin="0,0,14,0" IsVisible="{Binding LightboxHasNext}" Command="{Binding LightboxNextCommand}">
+          <Path Classes="glyph" Data="{StaticResource IconChevronDown}" Width="24" Height="24" Fill="White"
+                RenderTransform="rotate(-90deg)" />
+        </Button>
+      </Grid>
+    </Border>
+  </Grid>
+</UserControl>

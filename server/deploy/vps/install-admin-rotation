@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+app=/home/codex-deploy/turattext/app
+root=/home/codex-deploy/turattext
+bin=/home/codex-deploy/bin
+
+mkdir -p "$bin" "$root/logs"
+chmod 700 "$bin/turattext-admin-password" "$bin/turattext-rotate-admin-password"
+"$bin/turattext-rotate-admin-password" >/dev/null
+chmod 600 "$app/admin-password"
+
+stamp="$(date +%Y%m%d-%H%M%S)"
+backup="$root/deploy-backups/$stamp-admin-rotation"
+mkdir -p "$backup"
+cp "$app/turattext-server.jar" "$backup/"
+cp "$app/.env" "$backup/"
+if [[ -d "$app/data" ]]; then
+  tar -C "$app" -czf "$backup/data.tgz" data
+fi
+
+temporary_env="$(mktemp "$app/.env.XXXXXX")"
+grep -v -E '^TURATTEXT_ADMIN_PASSWORD(_FILE)?=' "$app/.env" > "$temporary_env" || true
+printf '\nTURATTEXT_ADMIN_PASSWORD_FILE=/home/codex-deploy/turattext/app/admin-password\n' >> "$temporary_env"
+chmod 600 "$temporary_env"
+mv -f "$temporary_env" "$app/.env"
+
+if [[ -f "$app/turattext-server.jar.new" ]]; then
+  mv -f "$app/turattext-server.jar.new" "$app/turattext-server.jar"
+fi
+chmod 644 "$app/turattext-server.jar"
+
+temporary_cron="$(mktemp)"
+(crontab -l 2>/dev/null || true) | grep -v 'turattext-rotate-admin-password' > "$temporary_cron" || true
+printf '0 0 * * * /home/codex-deploy/bin/turattext-rotate-admin-password >>/home/codex-deploy/turattext/logs/admin-password-rotation.log 2>&1\n' >> "$temporary_cron"
+crontab "$temporary_cron"
+rm -f "$temporary_cron"
+
+"$app/start.sh"
+for _ in $(seq 1 75); do
+  if curl -fsS http://127.0.0.1:8080/api/servers/health >/dev/null 2>&1; then
+    echo "TuratText admin rotation installed. Backup: $backup"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo 'TuratText failed to become healthy.' >&2
+tail -n 100 "$root/logs/turattext.log" >&2
+exit 1

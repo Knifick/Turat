@@ -1,0 +1,334 @@
+package app.turattext.mobile.ui
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
+import app.turattext.mobile.model.AppSnapshot
+import app.turattext.mobile.model.CoreJson
+import kotlinx.coroutines.launch
+
+/** Единый набор действий над ядром — иначе экранам пришлось бы передавать два десятка лямбд. */
+@Stable
+class AppActions(
+    val selectContact: (String?) -> Unit,
+    val addContact: (String, ((Boolean) -> Unit)?) -> Unit,
+    val deleteContact: (String) -> Unit,
+    val acceptContact: (String) -> Unit,
+    val rejectContact: (String) -> Unit,
+    val verifyContact: (String, Boolean) -> Unit,
+    val send: (String, String, String?) -> Unit,
+    val edit: (String, String) -> Unit,
+    val deleteMessages: (Set<String>) -> Unit,
+    val react: (Set<String>, String) -> Unit,
+    val forward: (Set<String>, String) -> Unit,
+    val setPinned: (String, Boolean) -> Unit,
+    val setMuted: (String, Boolean) -> Unit,
+    val saveDraft: (String, String) -> Unit,
+    val clearHistory: (String) -> Unit,
+    val markUnread: (String) -> Unit,
+    val search: (String) -> Unit,
+    val setPresence: (Boolean) -> Unit,
+    val sync: () -> Unit,
+    val command: (String, ((Boolean) -> Unit)?) -> Unit,
+    val pickAttachment: () -> Unit,
+    val pickAvatar: () -> Unit,
+    val export: (String, String, String) -> Unit,
+    val importFile: (String, String, Array<String>) -> Unit,
+)
+
+private sealed interface Overlay {
+    data object None : Overlay
+    data object NewChat : Overlay
+    data object Settings : Overlay
+    data object Themes : Overlay
+    data object Profile : Overlay
+    data class Forward(val eventIds: Set<String>) : Overlay
+}
+
+@Composable
+fun TuratTextApp(
+    state: AppSnapshot,
+    busy: Boolean,
+    theme: AppTheme,
+    onThemeChange: (AppTheme) -> Unit,
+    actions: AppActions,
+) {
+    val colors = Telegram.colors
+    if (state.onboardingRequired) {
+        OnboardingScreen(state.profile) { username, name ->
+            actions.command(
+                CoreJson.command(
+                    "save_profile",
+                    "username" to username,
+                    "display_name" to name,
+                    "about" to "",
+                    "avatar_base64" to null,
+                ),
+                null,
+            )
+        }
+        return
+    }
+
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    var overlay by remember { mutableStateOf<Overlay>(Overlay.None) }
+    var newChatSubmitted by remember { mutableStateOf(false) }
+
+    // Свайп вправо внутри диалога должен возвращать к списку чатов, а не открывать меню,
+    // поэтому жест шторки живёт только на самом списке.
+    val chatListVisible = state.selectedContact == null
+
+    Box(Modifier.fillMaxSize().background(colors.window)) {
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            gesturesEnabled = drawerState.isOpen || (chatListVisible && overlay == Overlay.None),
+            drawerContent = {
+                ModalDrawerSheet(
+                    drawerContainerColor = colors.panel,
+                    drawerContentColor = colors.text,
+                    drawerShape = RectangleShape,
+                ) {
+                    DrawerContent(
+                        profile = state.profile,
+                        userId = state.identity.userId,
+                        theme = theme,
+                        online = state.online,
+                        onOpenThemes = { scope.launch { drawerState.close() }; overlay = Overlay.Themes },
+                        onNewChat = {
+                            scope.launch { drawerState.close() }
+                            newChatSubmitted = false
+                            overlay = Overlay.NewChat
+                        },
+                        onSettings = { scope.launch { drawerState.close() }; overlay = Overlay.Settings },
+                        onSync = { scope.launch { drawerState.close() }; actions.sync() },
+                    )
+                }
+            },
+        ) {
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                val wide = maxWidth >= 720.dp
+                val width = with(LocalDensity.current) { maxWidth.toPx() }
+                val contactId = state.selectedContact?.userId
+
+                // Диалог лежит поверх списка и ездит по горизонтали: и жест, и открытие с
+                // закрытием двигают одно и то же смещение, поэтому переход всегда непрерывен.
+                val pane = remember { Animatable(0f) }
+                LaunchedEffect(contactId, width, wide) {
+                    when {
+                        wide -> pane.snapTo(0f)
+                        contactId == null -> pane.snapTo(width)
+                        pane.value != 0f -> pane.animateTo(0f, tween(260, easing = FastOutSlowInEasing))
+                    }
+                }
+
+                val closeConversation: () -> Unit = {
+                    scope.launch {
+                        pane.animateTo(width, tween(220, easing = FastOutLinearInEasing))
+                        actions.selectContact(null)
+                    }
+                }
+                val drag = rememberDraggableState { delta ->
+                    scope.launch { pane.snapTo((pane.value + delta).coerceIn(0f, width)) }
+                }
+
+                val chatList: @Composable (Modifier) -> Unit = { modifier ->
+                    ChatListPane(
+                        state = state,
+                        busy = busy,
+                        actions = actions,
+                        onOpenChat = actions.selectContact,
+                        onMenu = { scope.launch { drawerState.open() } },
+                        onNewChat = {
+                            newChatSubmitted = false
+                            overlay = Overlay.NewChat
+                        },
+                        modifier = modifier,
+                    )
+                }
+                val conversation: @Composable (Modifier, () -> Unit) -> Unit = { modifier, onBack ->
+                    ConversationPane(
+                        state = state,
+                        actions = actions,
+                        showBack = !wide,
+                        onBack = onBack,
+                        onOpenProfile = { overlay = Overlay.Profile },
+                        onForward = { overlay = Overlay.Forward(it) },
+                        modifier = modifier,
+                    )
+                }
+
+                if (wide) {
+                    Row(Modifier.fillMaxSize()) {
+                        chatList(Modifier.width(360.dp).fillMaxHeight())
+                        VerticalDivider(color = colors.divider, thickness = 1.dp)
+                        conversation(Modifier.weight(1f).fillMaxHeight()) { actions.selectContact(null) }
+                    }
+                } else {
+                    val open = contactId != null
+                    // 0 — диалог закрывает экран целиком, 1 — он полностью ушёл за правый край.
+                    val progress = if (!open || width <= 0f) 1f else (pane.value / width).coerceIn(0f, 1f)
+                    Box(Modifier.fillMaxSize()) {
+                        chatList(
+                            Modifier.fillMaxSize()
+                                .graphicsLayer { translationX = -ListParallax * width * (1f - progress) }
+                                .blockTouches(open),
+                        )
+                        if (open) {
+                            Box(
+                                Modifier.fillMaxSize()
+                                    .background(Color.Black.copy(alpha = ScrimAlpha * (1f - progress))),
+                            )
+                            conversation(
+                                Modifier.fillMaxSize()
+                                    .graphicsLayer { translationX = pane.value }
+                                    .draggable(
+                                        state = drag,
+                                        orientation = Orientation.Horizontal,
+                                        onDragStopped = { velocity ->
+                                            val back = pane.value > width * BackDistanceFraction ||
+                                                velocity > BackVelocity
+                                            if (back) {
+                                                pane.animateTo(width, tween(200, easing = FastOutLinearInEasing))
+                                                actions.selectContact(null)
+                                            } else {
+                                                pane.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+                                            }
+                                        },
+                                    ),
+                                closeConversation,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        OverlayScreen(overlay is Overlay.NewChat) {
+            NewChatScreen(
+                onBack = { overlay = Overlay.None },
+                busy = busy,
+                error = if (newChatSubmitted && !busy) state.statusMessage else null,
+                onCreate = { query ->
+                    newChatSubmitted = true
+                    actions.addContact(query) { added ->
+                        if (added) overlay = Overlay.None
+                    }
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.Settings) {
+            SettingsScreen(
+                state = state,
+                theme = theme,
+                actions = actions,
+                onThemeChange = onThemeChange,
+                onBack = { overlay = Overlay.None },
+            )
+        }
+        OverlayScreen(overlay is Overlay.Themes) {
+            ThemeScreen(
+                current = theme,
+                onPick = onThemeChange,
+                onBack = { overlay = Overlay.Settings },
+            )
+        }
+        OverlayScreen(overlay is Overlay.Profile && state.selectedContact != null) {
+            state.selectedContact?.let { contact ->
+                ContactProfileScreen(
+                    contact = contact,
+                    onBack = { overlay = Overlay.None },
+                    onVerify = { actions.verifyContact(contact.userId, it) },
+                    onDelete = { overlay = Overlay.None; actions.deleteContact(contact.userId) },
+                )
+            }
+        }
+        val forwarding = overlay as? Overlay.Forward
+        OverlayScreen(forwarding != null) {
+            forwarding?.let { request ->
+                ForwardScreen(
+                    state = state,
+                    onBack = { overlay = Overlay.None },
+                    onPick = { userId ->
+                        overlay = Overlay.None
+                        actions.forward(request.eventIds, userId)
+                    },
+                )
+            }
+        }
+    }
+
+    BackHandler(enabled = overlay != Overlay.None) {
+        overlay = if (overlay is Overlay.Themes) Overlay.Settings else Overlay.None
+    }
+}
+
+/** Насколько список подтягивается из-за левого края, пока диалог уезжает вправо. */
+private const val ListParallax = 0.3f
+private const val ScrimAlpha = 0.32f
+
+/** Порог возврата: треть ширины либо заметный бросок вправо. */
+private const val BackDistanceFraction = 0.3f
+private const val BackVelocity = 900f
+
+/**
+ * Пока диалог лежит поверх списка, касания не должны доходить до карточек под ним: фон сам
+ * по себе не перехватывает ввод, и нажатие «сквозь» диалог открыло бы чужой чат.
+ */
+private fun Modifier.blockTouches(blocked: Boolean): Modifier =
+    if (!blocked) this else this.pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) {
+                awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
+            }
+        }
+    }
+
+@Composable
+private fun OverlayScreen(visible: Boolean, content: @Composable () -> Unit) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = slideInHorizontally { it / 3 } + fadeIn(),
+        exit = slideOutHorizontally { it / 3 } + fadeOut(),
+    ) {
+        Box(Modifier.fillMaxSize().background(Telegram.colors.window)) { content() }
+    }
+}

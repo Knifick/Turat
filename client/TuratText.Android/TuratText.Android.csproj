@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-android36.0</TargetFramework>
+    <SupportedOSPlatformVersion>23</SupportedOSPlatformVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationId>app.turattext.mobile</ApplicationId>
+    <ApplicationVersion>20004</ApplicationVersion>
+    <ApplicationDisplayVersion>2.0.4</ApplicationDisplayVersion>
+    <AndroidPackageFormat>apk</AndroidPackageFormat>
+    <AndroidEnableProfiledAot>false</AndroidEnableProfiledAot>
+    <RunAOTCompilation>false</RunAOTCompilation>
+    <RuntimeIdentifiers>android-arm64;android-arm</RuntimeIdentifiers>
+    <AndroidCreatePackagePerAbi>false</AndroidCreatePackagePerAbi>
+    <!-- .NET 10 has a known release-startup crash with SdkOnly; keep the Android runtime intact. -->
+    <AndroidLinkMode>None</AndroidLinkMode>
+    <!-- Avalonia registers Java callbacks dynamically. Static marshal methods omit the
+         Application.onCreate registration in .NET 10 release builds. -->
+    <AndroidEnableMarshalMethods>false</AndroidEnableMarshalMethods>
+    <PublishTrimmed>false</PublishTrimmed>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <AndroidSdkDirectory Condition="'$(AndroidSdkDirectory)' == '' and Exists('$(LocalAppData)\Android\Sdk')">$(LocalAppData)\Android\Sdk</AndroidSdkDirectory>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Android" Version="12.1.1" />
+    <PackageReference Include="Xamarin.AndroidX.Core.SplashScreen" Version="1.0.1.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TuratText.Client\TuratText.Client.csproj" AdditionalProperties="BuildingForAndroid=true" />
+  </ItemGroup>
+</Project>

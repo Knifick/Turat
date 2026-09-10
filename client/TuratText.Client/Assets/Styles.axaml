@@ -1,0 +1,465 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Styles.Resources>
+    <!-- ============================ Palette ============================ -->
+    <SolidColorBrush x:Key="AppBackground" Color="#070A11" />
+    <SolidColorBrush x:Key="RailBackground" Color="#0A0E16" />
+    <SolidColorBrush x:Key="PanelBackground" Color="#0C111A" />
+    <SolidColorBrush x:Key="PanelElevated" Color="#151D2A" />
+    <SolidColorBrush x:Key="PanelHover" Color="#1B2533" />
+    <SolidColorBrush x:Key="CardBackground" Color="#111925" />
+    <SolidColorBrush x:Key="ChatBackground" Color="#070A11" />
+    <SolidColorBrush x:Key="BubbleBackground" Color="#141C29" />
+    <SolidColorBrush x:Key="SelectedChatBackground" Color="#1C2740" />
+
+    <SolidColorBrush x:Key="AccentBrush" Color="#6C8BFF" />
+    <SolidColorBrush x:Key="AccentAltBrush" Color="#9B6BFF" />
+    <SolidColorBrush x:Key="AccentWarmBrush" Color="#8FA9FF" />
+    <SolidColorBrush x:Key="AccentTealBrush" Color="#35DDC0" />
+
+    <SolidColorBrush x:Key="SoftTextBrush" Color="#E8EEF9" />
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#E8EEF9" />
+    <SolidColorBrush x:Key="MutedTextBrush" Color="#8493AC" />
+    <SolidColorBrush x:Key="FaintTextBrush" Color="#5D6B82" />
+
+    <SolidColorBrush x:Key="BorderBrushSoft" Color="#1B2430" />
+    <SolidColorBrush x:Key="BorderBrushStrong" Color="#27354A" />
+    <SolidColorBrush x:Key="DangerBrush" Color="#FF6B7A" />
+    <SolidColorBrush x:Key="SuccessBrush" Color="#3DDC97" />
+    <SolidColorBrush x:Key="WarnBrush" Color="#FFC061" />
+
+    <LinearGradientBrush x:Key="AccentGradient" StartPoint="0%,0%" EndPoint="100%,100%">
+      <GradientStop Offset="0" Color="#5B7BFF" />
+      <GradientStop Offset="1" Color="#9B6BFF" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="OutgoingBubbleBrush" StartPoint="0%,0%" EndPoint="100%,100%">
+      <GradientStop Offset="0" Color="#4B6DFF" />
+      <GradientStop Offset="1" Color="#7B57F0" />
+    </LinearGradientBrush>
+
+    <RadialGradientBrush x:Key="AuroraGlowBrush" Center="16%,4%" GradientOrigin="16%,4%" RadiusX="65%" RadiusY="55%">
+      <GradientStop Offset="0" Color="#3A5B7BFF" />
+      <GradientStop Offset="1" Color="#005B7BFF" />
+    </RadialGradientBrush>
+
+    <RadialGradientBrush x:Key="AuroraGlowAltBrush" Center="90%,94%" GradientOrigin="90%,94%" RadiusX="60%" RadiusY="55%">
+      <GradientStop Offset="0" Color="#309B6BFF" />
+      <GradientStop Offset="1" Color="#009B6BFF" />
+    </RadialGradientBrush>
+
+    <!-- ============================ Icons ============================ -->
+    <StreamGeometry x:Key="IconSettings">M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z</StreamGeometry>
+    <StreamGeometry x:Key="IconRefresh">M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4z</StreamGeometry>
+    <StreamGeometry x:Key="IconBack">M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z</StreamGeometry>
+    <StreamGeometry x:Key="IconChevronDown">M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z</StreamGeometry>
+    <StreamGeometry x:Key="IconSend">M2.01 21 23 12 2.01 3 2 10l15 2-15 2z</StreamGeometry>
+    <StreamGeometry x:Key="IconAttach">M16.5 6v11.5a4.5 4.5 0 0 1-9 0V5a3 3 0 0 1 6 0v10.5a1.5 1.5 0 0 1-3 0V6H9.5v9.5a3 3 0 0 0 6 0V5a4.5 4.5 0 0 0-9 0v12.5a6 6 0 0 0 12 0V6z</StreamGeometry>
+    <StreamGeometry x:Key="IconClose">M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z</StreamGeometry>
+    <StreamGeometry x:Key="IconPlus">M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z</StreamGeometry>
+    <StreamGeometry x:Key="IconSearch">M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z</StreamGeometry>
+    <StreamGeometry x:Key="IconLock">M18 8h-1V6A5 5 0 0 0 7 6v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zM9 6a3 3 0 0 1 6 0v2H9zm3 13a2 2 0 1 1 0-4 2 2 0 0 1 0 4z</StreamGeometry>
+    <StreamGeometry x:Key="IconChat">M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zM7 9h10v2H7zm6 5H7v-2h6zm4-6H7V6h10z</StreamGeometry>
+    <StreamGeometry x:Key="IconSparkle">M12 2l2.2 6.1L20.5 10l-6.3 1.9L12 18l-2.2-6.1L3.5 10l6.3-1.9z</StreamGeometry>
+    <StreamGeometry x:Key="IconFile">M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zm-1 7V3.5L18.5 9z</StreamGeometry>
+
+    <!-- ============================ Control themes ============================ -->
+    <ControlTheme x:Key="{x:Type Button}" TargetType="Button">
+      <Setter Property="Background" Value="{StaticResource PanelElevated}" />
+      <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="13" />
+      <Setter Property="Padding" Value="16,9" />
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="RenderTransform" Value="scale(1)" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.2" />
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.2" />
+          <BrushTransition Property="Foreground" Duration="0:0:0.2" />
+          <DoubleTransition Property="Opacity" Duration="0:0:0.2" />
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Root"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="{TemplateBinding CornerRadius}"
+                  ClipToBounds="True">
+            <ContentPresenter Name="PART_ContentPresenter"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              Padding="{TemplateBinding Padding}"
+                              Foreground="{TemplateBinding Foreground}"
+                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                              RecognizesAccessKey="True" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+
+      <Style Selector="^:pointerover">
+        <Setter Property="Background" Value="{StaticResource PanelHover}" />
+        <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
+        <Setter Property="RenderTransform" Value="scale(1.025)" />
+      </Style>
+      <Style Selector="^:pressed">
+        <Setter Property="RenderTransform" Value="scale(0.965)" />
+        <Setter Property="Opacity" Value="0.9" />
+      </Style>
+      <Style Selector="^:disabled">
+        <Setter Property="Opacity" Value="0.4" />
+        <Setter Property="RenderTransform" Value="scale(1)" />
+      </Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="{x:Type ListBoxItem}" TargetType="ListBoxItem">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Margin" Value="0,2" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="CornerRadius" Value="16" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.18" />
+        </Transitions>
+      </Setter>
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Root"
+                  Background="{TemplateBinding Background}"
+                  CornerRadius="{TemplateBinding CornerRadius}">
+            <ContentPresenter Name="PART_ContentPresenter"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              Padding="{TemplateBinding Padding}"
+                              HorizontalContentAlignment="Stretch"
+                              VerticalContentAlignment="Center" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+      <Style Selector="^:pointerover">
+        <Setter Property="Background" Value="#121A26" />
+      </Style>
+      <Style Selector="^:selected">
+        <Setter Property="Background" Value="{StaticResource SelectedChatBackground}" />
+      </Style>
+      <Style Selector="^:selected:pointerover">
+        <Setter Property="Background" Value="#22304C" />
+      </Style>
+    </ControlTheme>
+  </Styles.Resources>
+
+  <!-- ============================ Typography ============================ -->
+  <Style Selector="TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.h1">
+    <Setter Property="FontSize" Value="21" />
+    <Setter Property="FontWeight" Value="Bold" />
+  </Style>
+
+  <Style Selector="TextBlock.h2">
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.caption">
+    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+    <Setter Property="FontSize" Value="11.5" />
+  </Style>
+
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="Cascadia Mono,Consolas,Menlo,monospace" />
+    <Setter Property="FontSize" Value="10.5" />
+  </Style>
+
+  <!-- ============================ Buttons ============================ -->
+  <Style Selector="Button.primary">
+    <Setter Property="Background" Value="{StaticResource AccentGradient}" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="Button.primary:pointerover">
+    <Setter Property="Background" Value="{StaticResource AccentGradient}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.ghost">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
+    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+  </Style>
+  <Style Selector="Button.ghost:pointerover">
+    <Setter Property="Background" Value="{StaticResource PanelElevated}" />
+  </Style>
+
+  <Style Selector="Button.subtle">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+  </Style>
+  <Style Selector="Button.subtle:pointerover">
+    <Setter Property="Background" Value="#141C29" />
+    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+  </Style>
+
+  <Style Selector="Button.icon">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Width" Value="40" />
+    <Setter Property="Height" Value="40" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="20" />
+    <Setter Property="FontSize" Value="17" />
+    <Setter Property="Foreground" Value="{StaticResource MutedTextBrush}" />
+  </Style>
+  <Style Selector="Button.icon:pointerover">
+    <Setter Property="Background" Value="#18212F" />
+    <Setter Property="Foreground" Value="{StaticResource SoftTextBrush}" />
+    <Setter Property="RenderTransform" Value="scale(1.08)" />
+  </Style>
+  <Style Selector="Button.icon:pressed">
+    <Setter Property="RenderTransform" Value="scale(0.9)" />
+  </Style>
+
+  <!-- Icon glyphs inherit the button's own colour so hover transitions carry over -->
+  <Style Selector="Button Path.glyph">
+    <Setter Property="Stretch" Value="Uniform" />
+    <Setter Property="Width" Value="19" />
+    <Setter Property="Height" Value="19" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Fill" Value="{StaticResource MutedTextBrush}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Fill" Duration="0:0:0.2" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button:pointerover Path.glyph">
+    <Setter Property="Fill" Value="{StaticResource SoftTextBrush}" />
+  </Style>
+  <Style Selector="Button.send Path.glyph, Button.primary Path.glyph">
+    <Setter Property="Fill" Value="White" />
+  </Style>
+  <Style Selector="Button.send:pointerover Path.glyph, Button.primary:pointerover Path.glyph">
+    <Setter Property="Fill" Value="White" />
+  </Style>
+
+  <Style Selector="Button.send">
+    <Setter Property="Background" Value="{StaticResource AccentGradient}" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Width" Value="46" />
+    <Setter Property="Height" Value="46" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="23" />
+    <Setter Property="FontSize" Value="16" />
+  </Style>
+  <Style Selector="Button.send:pointerover">
+    <Setter Property="Background" Value="{StaticResource AccentGradient}" />
+    <Setter Property="RenderTransform" Value="scale(1.09)" />
+  </Style>
+  <Style Selector="Button.send:pressed">
+    <Setter Property="RenderTransform" Value="scale(0.9)" />
+  </Style>
+  <Style Selector="Button.send:disabled">
+    <Setter Property="Background" Value="{StaticResource PanelElevated}" />
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+  <Style Selector="Button.send:disabled Path.glyph">
+    <Setter Property="Fill" Value="{StaticResource FaintTextBrush}" />
+  </Style>
+
+  <Style Selector="Button.danger">
+    <Setter Property="Background" Value="#2A1620" />
+    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+    <Setter Property="BorderBrush" Value="#4A2430" />
+  </Style>
+  <Style Selector="Button.danger:pointerover">
+    <Setter Property="Background" Value="#3C1C29" />
+    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+  </Style>
+
+  <Style Selector="Button.chip">
+    <Setter Property="Background" Value="#141D2B" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+    <Setter Property="CornerRadius" Value="19" />
+    <Setter Property="Padding" Value="14,7" />
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="FontSize" Value="12.5" />
+  </Style>
+
+  <!-- ============================ Text inputs ============================ -->
+  <Style Selector="TextBox">
+    <Setter Property="Background" Value="{StaticResource PanelElevated}" />
+    <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+    <Setter Property="CaretBrush" Value="{StaticResource AccentBrush}" />
+    <Setter Property="SelectionBrush" Value="#4C6C8BFF" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="Padding" Value="15,11" />
+  </Style>
+
+  <Style Selector="TextBox /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource PanelElevated}" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.2" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.2" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <Style Selector="TextBox:pointerover /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="#18212F" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
+  </Style>
+
+  <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="#18212F" />
+    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+  </Style>
+
+  <Style Selector="TextBox:focus-within /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="#18212F" />
+    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+  </Style>
+
+  <!-- ============================ Surfaces ============================ -->
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{StaticResource CardBackground}" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.2" />
+        <BrushTransition Property="BorderBrush" Duration="0:0:0.2" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Border.card:pointerover">
+    <Setter Property="Background" Value="#141D2B" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStrong}" />
+  </Style>
+
+  <Style Selector="Border.pill">
+    <Setter Property="Background" Value="#141D2B" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="Padding" Value="10,5" />
+  </Style>
+
+  <!-- ============================ Chat list ============================ -->
+  <Style Selector="ListBox">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+
+  <!-- ============================ Expander ============================ -->
+  <Style Selector="Expander">
+    <Setter Property="Background" Value="{StaticResource CardBackground}" />
+    <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+  </Style>
+
+  <!-- ============================ Animations ============================ -->
+  <Style Selector=":is(Control).riseIn">
+    <Style.Animations>
+      <Animation Duration="0:0:0.34" Easing="CubicEaseOut" FillMode="Forward">
+        <KeyFrame Cue="0%">
+          <Setter Property="Opacity" Value="0" />
+          <Setter Property="TranslateTransform.Y" Value="14" />
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="Opacity" Value="1" />
+          <Setter Property="TranslateTransform.Y" Value="0" />
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+
+  <Style Selector=":is(Control).fadeIn">
+    <Style.Animations>
+      <Animation Duration="0:0:0.22" Easing="CubicEaseOut" FillMode="Forward">
+        <KeyFrame Cue="0%"><Setter Property="Opacity" Value="0" /></KeyFrame>
+        <KeyFrame Cue="100%"><Setter Property="Opacity" Value="1" /></KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+
+  <Style Selector=":is(Control).popIn">
+    <Style.Animations>
+      <Animation Duration="0:0:0.3" Easing="CubicEaseOut" FillMode="Forward">
+        <KeyFrame Cue="0%">
+          <Setter Property="Opacity" Value="0" />
+          <Setter Property="ScaleTransform.ScaleX" Value="0.9" />
+          <Setter Property="ScaleTransform.ScaleY" Value="0.9" />
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="Opacity" Value="1" />
+          <Setter Property="ScaleTransform.ScaleX" Value="1" />
+          <Setter Property="ScaleTransform.ScaleY" Value="1" />
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+
+  <Style Selector="Border.messageBubble">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.2" />
+      </Transitions>
+    </Setter>
+    <Style.Animations>
+      <Animation Duration="0:0:0.32" Easing="CubicEaseOut" FillMode="Forward">
+        <KeyFrame Cue="0%">
+          <Setter Property="Opacity" Value="0" />
+          <Setter Property="TranslateTransform.Y" Value="12" />
+          <Setter Property="ScaleTransform.ScaleX" Value="0.96" />
+          <Setter Property="ScaleTransform.ScaleY" Value="0.96" />
+        </KeyFrame>
+        <KeyFrame Cue="100%">
+          <Setter Property="Opacity" Value="1" />
+          <Setter Property="TranslateTransform.Y" Value="0" />
+          <Setter Property="ScaleTransform.ScaleX" Value="1" />
+          <Setter Property="ScaleTransform.ScaleY" Value="1" />
+        </KeyFrame>
+      </Animation>
+    </Style.Animations>
+  </Style>
+
+  <!-- No IterationCount="INFINITE" animations live here on purpose. Avalonia keeps repainting the
+       whole window while one exists — even on a collapsed element — and with the ambient gradients
+       that measured ~26% of a CPU core at idle. Status is shown with static art instead. -->
+</Styles>

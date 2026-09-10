@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType Condition="'$(BuildingForAndroid)' != 'true'">WinExe</OutputType>
+    <OutputType Condition="'$(BuildingForAndroid)' == 'true'">Library</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Version>2.0.1</Version>
+    <AssemblyVersion>2.0.1.0</AssemblyVersion>
+    <FileVersion>2.0.1.0</FileVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <ApplicationIcon Condition="'$(BuildingForAndroid)' != 'true'">Assets\TuratText.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" Condition="'$(BuildingForAndroid)' != 'true'" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.30" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(BuildingForAndroid)' == 'true'">
+    <Compile Remove="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\TuratTexticon.png" />
+    <AvaloniaResource Include="Assets\Reactions\*.png" />
+    <AvaloniaResource Include="Assets\Fonts\NotoColorEmoji.ttf" />
+    <EmbeddedResource Include="Assets\Fonts\NotoEmoji-LICENSE.txt" LogicalName="NotoEmoji.LICENSE" />
+  </ItemGroup>
+
+</Project>

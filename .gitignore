@@ -1,0 +1,25 @@
+# Offline release authority. Never commit or copy these private keys to a server.
+/release-secrets/
+/server/deploy/v2/turattext-server.jar
+
+# Local build and runtime data.
+/artifacts/
+/server/build/
+/server/.gradle/
+/server/data/
+**/bin/
+**/obj/
+/client/core/target/
+/client/android/.gradle/
+/client/android/.kotlin/
+/client/android/build/
+/client/android/app/build/
+/client/android/app/src/main/jniLibs/
+/client/windows/native/
+
+# Устаревшие сборки прежнего бренда в корне: артефакты живут в /artifacts.
+/TuratText.apk
+/TuratText.exe
+
+# Опубликованные пакеты обновлений Node — тоже результат сборки, а не исходник.
+/server/deploy/v2/updates/

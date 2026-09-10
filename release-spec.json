@@ -1,0 +1,21 @@
+{
+  "channel": "stable",
+  "sequence": 6,
+  "releaseVersion": "3.0.0",
+  "notesUrl": "/updates/stable/notes.html",
+  "expiresDays": 90,
+  "artifacts": [
+    {
+      "platform": "windows",
+      "architecture": "x64",
+      "url": "/updates/stable/Turat-win-x64.zip",
+      "localPath": "artifacts/Turat-win-x64.zip"
+    },
+    {
+      "platform": "android",
+      "architecture": "universal",
+      "url": "/updates/stable/Turat.apk",
+      "localPath": "artifacts/Turat.apk"
+    }
+  ]
+}

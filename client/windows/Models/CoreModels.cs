@@ -1,0 +1,296 @@
+using System.Text.Json.Serialization;
+using Microsoft.UI;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI;
+
+namespace TuratText.Windows;
+
+public sealed record CoreResponse(bool Ok, AppSnapshot? Snapshot, object? Value, string? Error);
+
+public sealed record IdentityModel(string UserId, string DeviceId, bool IsAuthority);
+
+public sealed record ProfileModel(string Username, string DisplayName, string About, string? AvatarBase64);
+
+public sealed record SettingsModel(string BootstrapUrl, string MetadataProtection, bool PublishPresence);
+
+/// <summary>Строка списка чатов: контакт плюс превью последнего события и непрочитанные.</summary>
+public sealed record ChatModel(
+    string UserId,
+    string DisplayName,
+    string? Username,
+    string? About,
+    string? AvatarBase64,
+    bool FingerprintVerified,
+    bool PendingApproval,
+    long? LastSeenUnixMilliseconds,
+    bool Pinned,
+    bool Muted,
+    string Draft,
+    bool ManualUnread,
+    string Preview,
+    long LastActivityUnixMilliseconds,
+    bool HasLastMessage,
+    bool LastMessageOutgoing,
+    bool LastMessageDelivered,
+    bool LastMessageRead,
+    int UnreadCount)
+{
+    [JsonIgnore] public string Initials => Formatting.Initials(DisplayName);
+    [JsonIgnore] public Brush AvatarBrush => AvatarPalette.For(UserId);
+    [JsonIgnore] public string TimeLabel => Formatting.ChatListTime(LastActivityUnixMilliseconds);
+
+    [JsonIgnore]
+    public string PreviewText => Draft.Length > 0
+        ? Draft
+        : PendingApproval ? "Хочет начать диалог"
+        : Preview.Length > 0 ? Preview
+        : Username is null ? Formatting.ShortId(UserId) : "@" + Username;
+
+    [JsonIgnore] public Visibility DraftVisibility => Draft.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility PinnedVisibility => Pinned && UnreadCount == 0 && !ManualUnread ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility MutedVisibility => Muted ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility UnreadDotVisibility => ManualUnread && UnreadCount == 0 ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public string PinMenuLabel => Pinned ? "Открепить" : "Закрепить";
+    [JsonIgnore] public string MuteMenuLabel => Muted ? "Включить звук" : "Отключить звук";
+
+    [JsonIgnore] public string UnreadLabel => UnreadCount > 999 ? "999+" : UnreadCount.ToString();
+    [JsonIgnore] public Visibility UnreadVisibility => UnreadCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>Чат «без звука» показывает приглушённый счётчик, как в Telegram.</summary>
+    [JsonIgnore]
+    public Brush UnreadBadgeBrush =>
+        (Brush)Application.Current.Resources[Muted ? "TgBadgeMuted" : "TgBadge"];
+    [JsonIgnore] public Visibility VerifiedVisibility => FingerprintVerified ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility OnlineVisibility => Formatting.IsOnline(LastSeenUnixMilliseconds) ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore]
+    public Visibility SingleTickVisibility =>
+        HasLastMessage && LastMessageOutgoing && !LastMessageDelivered ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore]
+    public Visibility DoubleTickVisibility =>
+        HasLastMessage && LastMessageOutgoing && LastMessageDelivered ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore] public string Presence => Formatting.Presence(PendingApproval, LastSeenUnixMilliseconds);
+    [JsonIgnore] public string SecurityBadge => FingerprintVerified ? "Fingerprint сверен" : "Fingerprint не сверен";
+}
+
+public sealed record AttachmentModel(string AttachmentId, string FileName, string MimeType, long Size, string LocalPath)
+{
+    [JsonIgnore] public string SizeLabel => Formatting.Bytes(Size);
+}
+
+public sealed record MessageModel(
+    string EventId,
+    string SenderUserId,
+    string Text,
+    long CreatedAtUnixMilliseconds,
+    bool Outgoing,
+    bool Edited,
+    bool Deleted,
+    IReadOnlyList<string> Reactions,
+    bool Delivered,
+    bool Read,
+    AttachmentModel? Attachment,
+    string? ReplyToEventId,
+    string? ForwardedFrom)
+{
+    /// <summary>Telegram склеивает подряд идущие сообщения одного автора в одну группу.</summary>
+    [JsonIgnore] public bool FirstInGroup { get; set; } = true;
+
+    [JsonIgnore] public bool LastInGroup { get; set; } = true;
+
+    [JsonIgnore] public string DisplayText => Deleted ? "Сообщение удалено" : Text;
+    [JsonIgnore] public Visibility TextVisibility => DisplayText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public string TimeLabel => Formatting.Time(CreatedAtUnixMilliseconds);
+    [JsonIgnore] public string ReactionSummary => string.Join(" ", Reactions);
+    [JsonIgnore] public string EditedLabel => Edited ? "изм." : string.Empty;
+    [JsonIgnore] public Visibility EditedVisibility => Edited ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility AttachmentVisibility => Attachment is null ? Visibility.Collapsed : Visibility.Visible;
+    [JsonIgnore] public Visibility ReactionVisibility => Reactions.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+
+    [JsonIgnore]
+    public Visibility SingleTickVisibility => Outgoing && !Delivered ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore]
+    public Visibility DoubleTickVisibility => Outgoing && Delivered ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore] public Thickness RowMargin => new(0, FirstInGroup ? 8 : 2, 0, 0);
+
+    /// <summary>Цитата ответа и заголовок пересылки заполняются окном при построении ленты.</summary>
+    [JsonIgnore] public string ReplyAuthor { get; set; } = string.Empty;
+
+    [JsonIgnore] public string ReplyText { get; set; } = string.Empty;
+
+    [JsonIgnore] public Visibility ReplyVisibility => ReplyText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore] public string ForwardLabel => ForwardedFrom is null ? string.Empty : "Переслано от " + ForwardedFrom;
+
+    [JsonIgnore] public Visibility ForwardVisibility => ForwardedFrom is null ? Visibility.Collapsed : Visibility.Visible;
+
+    [JsonIgnore] public string Quote => Deleted ? "Сообщение удалено"
+        : Text.Length > 0 ? Text
+        : Attachment is not null ? "📎 " + Attachment.FileName : "Сообщение";
+
+    /// <summary>Скруглениe как в Telegram: «хвост» у последнего пузыря группы.</summary>
+    [JsonIgnore]
+    public CornerRadius BubbleCorners => Outgoing
+        ? new CornerRadius(14, FirstInGroup ? 14 : 5, LastInGroup ? 4 : 5, 14)
+        : new CornerRadius(FirstInGroup ? 14 : 5, 14, 14, LastInGroup ? 4 : 5);
+}
+
+/// <summary>Разделитель дня в ленте сообщений.</summary>
+public sealed class DaySeparator(string label)
+{
+    public string Label { get; } = label;
+}
+
+public sealed record AppSnapshot(
+    IdentityModel Identity,
+    ProfileModel Profile,
+    IReadOnlyList<ChatModel> Chats,
+    string? SelectedContactId,
+    IReadOnlyList<MessageModel> Messages,
+    SettingsModel Settings,
+    bool Online,
+    string StatusMessage,
+    bool OnboardingRequired,
+    string SearchQuery,
+    IReadOnlyList<SearchHitModel> SearchResults)
+{
+    [JsonIgnore] public ChatModel? SelectedChat => Chats.FirstOrDefault(value => value.UserId == SelectedContactId);
+}
+
+/// <summary>Найденное сообщение в глобальном поиске.</summary>
+public sealed record SearchHitModel(
+    string EventId,
+    string UserId,
+    string DisplayName,
+    string? AvatarBase64,
+    string Text,
+    long CreatedAtUnixMilliseconds,
+    bool Outgoing)
+{
+    [JsonIgnore] public string Initials => Formatting.Initials(DisplayName);
+    [JsonIgnore] public Brush AvatarBrush => AvatarPalette.For(UserId);
+    [JsonIgnore] public string TimeLabel => Formatting.ChatListTime(CreatedAtUnixMilliseconds);
+    [JsonIgnore] public string Preview => (Outgoing ? "Вы: " : string.Empty) + Text;
+}
+
+/// <summary>Семь фирменных градиентов аватарок Telegram.</summary>
+internal static class AvatarPalette
+{
+    private static readonly (uint Top, uint Bottom)[] Gradients =
+    [
+        (0xFFFF885E, 0xFFFF516A),
+        (0xFFFFCD6A, 0xFFFFA85C),
+        (0xFFE0A2F3, 0xFFD669ED),
+        (0xFFA0DE7E, 0xFF54CB68),
+        (0xFF53EDD6, 0xFF28C9B7),
+        (0xFF72D5FD, 0xFF2A9EF1),
+        (0xFFB694F9, 0xFF6C61DF),
+    ];
+
+    public static Brush For(string key)
+    {
+        (uint top, uint bottom) = Gradients[(int)(Formatting.StableHash(key) % (uint)Gradients.Length)];
+        var brush = new LinearGradientBrush { StartPoint = new(0, 0), EndPoint = new(0, 1) };
+        brush.GradientStops.Add(new GradientStop { Color = FromArgb(top), Offset = 0 });
+        brush.GradientStops.Add(new GradientStop { Color = FromArgb(bottom), Offset = 1 });
+        return brush;
+    }
+
+    private static Color FromArgb(uint value) =>
+        ColorHelper.FromArgb((byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte)value);
+}
+
+internal static class Formatting
+{
+    private static readonly string[] Months =
+    [
+        "января", "февраля", "марта", "апреля", "мая", "июня",
+        "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    ];
+
+    private static readonly string[] Weekdays = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+
+    /// <summary>Совпадает с String.hashCode() из Java, чтобы аватарки были одного цвета на всех клиентах.</summary>
+    public static uint StableHash(string value)
+    {
+        unchecked
+        {
+            int hash = 0;
+            foreach (char symbol in value) hash = (31 * hash) + symbol;
+            return (uint)Math.Abs((long)hash);
+        }
+    }
+
+    public static string Initials(string name)
+    {
+        string[] words = name.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return words.Length switch
+        {
+            0 => "#",
+            1 => words[0][..1].ToUpperInvariant(),
+            _ => (words[0][..1] + words[^1][..1]).ToUpperInvariant(),
+        };
+    }
+
+    public static string ShortId(string value) => value.Length <= 20 ? value : value[..11] + "…" + value[^6..];
+
+    public static string Bytes(long value) => value < 1024
+        ? $"{value} Б"
+        : value < 1024 * 1024 ? $"{value / 1024} КБ" : $"{value / 1048576d:F1} МБ";
+
+    public static DateTimeOffset Local(long value) => DateTimeOffset.FromUnixTimeMilliseconds(value).ToLocalTime();
+
+    public static string Time(long value) => Local(value).ToString("HH:mm");
+
+    private static int DaysFromToday(long value) =>
+        (DateTime.Today - Local(value).Date).Days;
+
+    public static string ChatListTime(long value)
+    {
+        if (value <= 0) return string.Empty;
+        int days = DaysFromToday(value);
+        DateTimeOffset moment = Local(value);
+        return days switch
+        {
+            <= 0 => moment.ToString("HH:mm"),
+            < 7 => Weekdays[(int)moment.DayOfWeek],
+            < 330 => moment.ToString("dd.MM"),
+            _ => moment.ToString("dd.MM.yy"),
+        };
+    }
+
+    public static string DateSeparator(long value)
+    {
+        int days = DaysFromToday(value);
+        DateTimeOffset moment = Local(value);
+        return days switch
+        {
+            0 => "Сегодня",
+            1 => "Вчера",
+            < 330 => $"{moment.Day} {Months[moment.Month - 1]}",
+            _ => $"{moment.Day} {Months[moment.Month - 1]} {moment.Year}",
+        };
+    }
+
+    public static bool SameDay(long left, long right) => Local(left).Date == Local(right).Date;
+
+    public static bool IsOnline(long? lastSeen) =>
+        lastSeen is long value && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - value < 90_000;
+
+    public static string Presence(bool pending, long? lastSeen)
+    {
+        if (pending) return "запрос на общение";
+        if (lastSeen is not long value) return "был(а) недавно";
+        if (IsOnline(lastSeen)) return "в сети";
+        return DaysFromToday(value) switch
+        {
+            0 => $"был(а) в {Time(value)}",
+            1 => $"был(а) вчера в {Time(value)}",
+            _ => $"был(а) {DateSeparator(value)}",
+        };
+    }
+}

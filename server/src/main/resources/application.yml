@@ -1,0 +1,68 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: turattext-server
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/turattext}
+    username: ${DATABASE_USERNAME:turattext}
+    password: ${DATABASE_PASSWORD:change-me}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+turattext:
+  jwt:
+    secret: ${JWT_SECRET:replace-with-at-least-32-random-bytes-base64-or-long-secret}
+    access-ttl-minutes: ${JWT_ACCESS_TTL_MINUTES:30}
+    refresh-ttl-days: ${JWT_REFRESH_TTL_DAYS:30}
+  server:
+    id: ${TURATTEXT_SERVER_ID:00000000-0000-0000-0000-000000000001}
+    name: ${TURATTEXT_SERVER_NAME:Main TuratText Server}
+    base-url: ${TURATTEXT_SERVER_BASE_URL:http://localhost:8080}
+    self-register: ${TURATTEXT_SERVER_SELF_REGISTER:false}
+  admin:
+    password: ${TURATTEXT_ADMIN_PASSWORD:}
+    password-file: ${TURATTEXT_ADMIN_PASSWORD_FILE:}
+    token-ttl-minutes: ${TURATTEXT_ADMIN_TOKEN_TTL_MINUTES:60}
+  backup:
+    enabled: ${TURATTEXT_BACKUP_ENABLED:true}
+    directory: ${TURATTEXT_BACKUP_DIRECTORY:./backups}
+    interval-ms: ${TURATTEXT_BACKUP_INTERVAL_MS:21600000}
+    initial-delay-ms: ${TURATTEXT_BACKUP_INITIAL_DELAY_MS:60000}
+  media:
+    directory: ${TURATTEXT_MEDIA_DIRECTORY:./data/media}
+  replication:
+    authority: ${TURATTEXT_REPLICATION_AUTHORITY:false}
+    local-control-secret: ${TURATTEXT_LOCAL_CONTROL_SECRET:}
+    config-file: ${TURATTEXT_REPLICATION_CONFIG_FILE:./data/replication-config.json}
+    interval-ms: ${TURATTEXT_REPLICATION_INTERVAL_MS:10000}
+    failover-ms: ${TURATTEXT_REPLICATION_FAILOVER_MS:90000}
+  v2:
+    only: ${TURATTEXT_V2_ONLY:false}
+    requests-per-minute: ${TURATTEXT_V2_REQUESTS_PER_MINUTE:600}
+    trust-forwarded-for: ${TURATTEXT_V2_TRUST_FORWARDED_FOR:false}
+    node-identity-file: ${TURATTEXT_V2_NODE_IDENTITY_FILE:./data/node-identity-v2.json}
+    mailbox-max-ttl-hours: ${TURATTEXT_V2_MAILBOX_MAX_TTL_HOURS:336}
+    mailbox-max-envelope-bytes: ${TURATTEXT_V2_MAILBOX_MAX_ENVELOPE_BYTES:524288}
+    mailbox-max-envelopes: ${TURATTEXT_V2_MAILBOX_MAX_ENVELOPES:2000}
+    registration-pow-bits: ${TURATTEXT_V2_REGISTRATION_POW_BITS:0}
+    envelope-pow-bits: ${TURATTEXT_V2_ENVELOPE_POW_BITS:0}
+    contact-pow-bits: ${TURATTEXT_V2_CONTACT_POW_BITS:0}
+    contact-max-envelope-bytes: ${TURATTEXT_V2_CONTACT_MAX_ENVELOPE_BYTES:65536}
+    contact-max-envelopes: ${TURATTEXT_V2_CONTACT_MAX_ENVELOPES:64}
+    blob-max-bytes: ${TURATTEXT_V2_BLOB_MAX_BYTES:104857600}
+    blob-max-chunk-bytes: ${TURATTEXT_V2_BLOB_MAX_CHUNK_BYTES:1048576}
