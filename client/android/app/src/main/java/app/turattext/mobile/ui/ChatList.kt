@@ -1,5 +1,6 @@
 package app.turattext.mobile.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -54,6 +55,7 @@ import app.turattext.mobile.R
 import app.turattext.mobile.model.AppSnapshot
 import app.turattext.mobile.model.Chat
 import app.turattext.mobile.model.SearchHit
+import app.turattext.mobile.update.UpdateState
 import kotlinx.coroutines.delay
 
 /** Левая колонка Telegram: шапка, поиск, список чатов и круглая кнопка нового чата. */
@@ -61,10 +63,12 @@ import kotlinx.coroutines.delay
 fun ChatListPane(
     state: AppSnapshot,
     busy: Boolean,
+    update: UpdateState,
     actions: AppActions,
     onOpenChat: (String) -> Unit,
     onMenu: () -> Unit,
     onNewChat: () -> Unit,
+    onOpenUpdate: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = Telegram.colors
@@ -117,6 +121,11 @@ fun ChatListPane(
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
             )
+        }
+
+        // Во время поиска строка об обновлении только мешала бы.
+        AnimatedVisibility(update.showBanner && !searching) {
+            update.available?.let { release -> UpdateBanner(release, onOpenUpdate, actions.dismissUpdate) }
         }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {

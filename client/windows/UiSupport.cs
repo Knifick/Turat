@@ -95,39 +95,51 @@ internal static class UiSettings
     /// <summary>Идентификатор темы из <see cref="ThemeCatalog"/>.</summary>
     public static string ThemeId
     {
-        get => Read("theme", ThemeCatalog.All[0].Id);
-        set => Write(value, FontId);
+        get => Read("theme") ?? ThemeCatalog.All[0].Id;
+        set => Write("theme", value);
     }
 
     /// <summary>Идентификатор локальной гарнитуры из <see cref="FontCatalog"/>.</summary>
     public static string FontId
     {
-        get => Read("font", FontCatalog.Default.Id);
-        set => Write(ThemeId, value);
+        get => Read("font") ?? FontCatalog.Default.Id;
+        set => Write("font", value);
     }
 
-    private static string Read(string property, string fallback)
+    /// <summary>Версия, от которой пользователь отказался: о ней больше не напоминаем.</summary>
+    public static string? SkippedUpdateVersion
+    {
+        get => Read("skippedUpdate");
+        set => Write("skippedUpdate", value);
+    }
+
+    private static string? Read(string property) =>
+        Load().TryGetValue(property, out string? value) ? value : null;
+
+    private static Dictionary<string, string> Load()
     {
         try
         {
-            if (!File.Exists(Path)) return fallback;
-            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path));
-            return document.RootElement.TryGetProperty(property, out JsonElement value)
-                ? value.GetString() ?? fallback
-                : fallback;
+            return File.Exists(Path)
+                ? JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(Path)) ?? []
+                : [];
         }
         catch
         {
-            return fallback;
+            return [];
         }
     }
 
-    private static void Write(string theme, string font)
+    /// <summary>Меняет одно поле, сохраняя остальные: каждая настройка пишется независимо.</summary>
+    private static void Write(string property, string? value)
     {
         try
         {
+            Dictionary<string, string> values = Load();
+            if (value is null) values.Remove(property);
+            else values[property] = value;
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
-            File.WriteAllText(Path, JsonSerializer.Serialize(new { theme, font }));
+            File.WriteAllText(Path, JsonSerializer.Serialize(values));
         }
         catch
         {

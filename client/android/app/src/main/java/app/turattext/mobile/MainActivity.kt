@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
                 val busy by model.busy.collectAsStateWithLifecycle()
                 val uploads by model.uploads.collectAsStateWithLifecycle()
                 val downloads by model.downloads.collectAsStateWithLifecycle()
+                val update by model.update.collectAsStateWithLifecycle()
                 var pendingImport by remember { mutableStateOf<Pair<String, String>?>(null) }
                 var pendingExport by remember { mutableStateOf<Triple<String, String, String>?>(null) }
                 var pendingAttachmentSave by remember { mutableStateOf<String?>(null) }
@@ -165,6 +166,11 @@ class MainActivity : ComponentActivity() {
                             pendingImport = command to passphrase
                             importer.launch(mimeTypes)
                         },
+                        checkUpdates = model::checkForUpdates,
+                        installUpdate = model::installUpdate,
+                        cancelUpdate = model::cancelUpdate,
+                        dismissUpdate = model::dismissUpdate,
+                        skipUpdate = model::skipUpdate,
                     )
                 }
 
@@ -173,6 +179,7 @@ class MainActivity : ComponentActivity() {
                     busy = busy,
                     uploads = uploads,
                     downloads = downloads,
+                    update = update,
                     theme = theme,
                     font = font,
                     onThemeChange = model::setTheme,

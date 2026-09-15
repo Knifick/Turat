@@ -48,6 +48,7 @@ import app.turattext.mobile.model.AppSnapshot
 import app.turattext.mobile.model.CoreJson
 import app.turattext.mobile.model.Message
 import app.turattext.mobile.model.PendingUpload
+import app.turattext.mobile.update.UpdateState
 import kotlinx.coroutines.launch
 
 /** Единый набор действий над ядром — иначе экранам пришлось бы передавать два десятка лямбд. */
@@ -83,6 +84,13 @@ class AppActions(
     val cancelTransfer: (String) -> Unit,
     val export: (String, String, String) -> Unit,
     val importFile: (String, String, Array<String>) -> Unit,
+    val checkUpdates: () -> Unit,
+    val installUpdate: () -> Unit,
+    val cancelUpdate: () -> Unit,
+    /** Скрывает строку об обновлении до следующего запуска. */
+    val dismissUpdate: () -> Unit,
+    /** Отказ от предложенной версии насовсем. */
+    val skipUpdate: () -> Unit,
 )
 
 private sealed interface Overlay {
@@ -91,6 +99,7 @@ private sealed interface Overlay {
     data object Settings : Overlay
     data object Themes : Overlay
     data object Profile : Overlay
+    data object Update : Overlay
     data class Forward(val eventIds: Set<String>) : Overlay
 }
 
@@ -100,6 +109,7 @@ fun TuratTextApp(
     busy: Boolean,
     uploads: List<PendingUpload>,
     downloads: Map<String, MediaTransfer>,
+    update: UpdateState,
     theme: AppTheme,
     font: AppFont,
     onThemeChange: (AppTheme) -> Unit,
@@ -208,6 +218,7 @@ fun TuratTextApp(
                     ChatListPane(
                         state = state,
                         busy = busy,
+                        update = update,
                         actions = actions,
                         onOpenChat = actions.selectContact,
                         onMenu = { scope.launch { drawerState.open() } },
@@ -215,6 +226,7 @@ fun TuratTextApp(
                             newChatSubmitted = false
                             overlay = Overlay.NewChat
                         },
+                        onOpenUpdate = { overlay = Overlay.Update },
                         modifier = modifier,
                     )
                 }
@@ -305,13 +317,28 @@ fun TuratTextApp(
         OverlayScreen(overlay is Overlay.Settings) {
             SettingsScreen(
                 state = state,
+                update = update,
                 theme = theme,
                 font = font,
                 actions = actions,
                 onThemeChange = onThemeChange,
                 onFontChange = onFontChange,
+                onOpenUpdate = { overlay = Overlay.Update },
                 onBack = { overlay = Overlay.None },
             )
+        }
+        OverlayScreen(overlay is Overlay.Update && update.available != null) {
+            update.available?.let { release ->
+                UpdateScreen(
+                    update = update,
+                    release = release,
+                    onInstall = actions.installUpdate,
+                    onCancel = actions.cancelUpdate,
+                    onLater = { actions.dismissUpdate(); overlay = Overlay.None },
+                    onSkip = { actions.skipUpdate(); overlay = Overlay.None },
+                    onBack = { overlay = Overlay.None },
+                )
+            }
         }
         OverlayScreen(overlay is Overlay.Themes) {
             ThemeScreen(

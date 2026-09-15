@@ -63,6 +63,7 @@ import app.turattext.mobile.model.AppSnapshot
 import app.turattext.mobile.model.Contact
 import app.turattext.mobile.model.CoreJson
 import app.turattext.mobile.model.Profile
+import app.turattext.mobile.update.UpdateState
 
 /** Боковое меню Telegram: градиентная шапка профиля и список разделов. */
 @Composable
@@ -683,11 +684,13 @@ private fun FontCard(
 @Composable
 fun SettingsScreen(
     state: AppSnapshot,
+    update: UpdateState,
     theme: AppTheme,
     font: AppFont,
     actions: AppActions,
     onThemeChange: (AppTheme) -> Unit,
     onFontChange: (AppFont) -> Unit,
+    onOpenUpdate: () -> Unit,
     onBack: () -> Unit,
 ) {
     val colors = Telegram.colors
@@ -889,6 +892,25 @@ fun SettingsScreen(
                 "Экспорт сети", { actions.export("export_discovery", "", "network.ttbridge") },
                 "Импорт сети", { actions.importFile("import_discovery", "", arrayOf("*/*")) },
             )
+        }
+
+        item { SectionTitle("Обновления") }
+        item {
+            SectionRow(
+                R.drawable.ic_sync,
+                if (update.checking) "Проверяем…" else "Проверить обновления",
+                listOfNotNull("Установлена версия ${update.currentVersion}", update.message).joinToString(" · "),
+            ) { actions.checkUpdates() }
+        }
+        update.available?.let { release ->
+            item {
+                SectionRow(
+                    R.drawable.ic_download,
+                    "Доступна версия ${release.version}",
+                    "Что нового и обновление",
+                    onClick = onOpenUpdate,
+                )
+            }
         }
         }
 

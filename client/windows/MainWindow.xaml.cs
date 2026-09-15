@@ -99,6 +99,7 @@ public sealed partial class MainWindow : Window
         {
             _closing = true;
             _searchTimer.Stop();
+            StopUpdates();
             PersistDraft();
             CloseMediaViewer();
             _core.Dispose();
@@ -109,6 +110,7 @@ public sealed partial class MainWindow : Window
     {
         ApplyTheme(ThemeCatalog.Resolve(UiSettings.ThemeId));
         ApplyFont(FontCatalog.Resolve(UiSettings.FontId));
+        StartUpdateChecks();
         await ExecuteAsync(new { command = "snapshot" });
         // Клиент подключается к Node сам: кнопка синхронизации — ускоритель, а не условие связи.
         await SyncAsync();

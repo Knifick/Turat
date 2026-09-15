@@ -1,4 +1,5 @@
 using TuratText.Windows.Interop;
+using TuratText.Windows.Updates;
 
 namespace TuratText.Windows;
 
@@ -22,6 +23,9 @@ internal static class Program
                 return 3;
             }
         }
+
+        // После обновления из приложения: дождаться выхода прежней версии и убрать её файл.
+        GitHubUpdater.CompletePendingUpdate(args);
 
         XamlGeneratedProgram.XamlGeneratedMain();
         return 0;

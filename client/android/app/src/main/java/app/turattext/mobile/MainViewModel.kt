@@ -16,7 +16,11 @@ import app.turattext.mobile.model.PendingUpload
 import app.turattext.mobile.ui.AppTheme
 import app.turattext.mobile.ui.AppFont
 import app.turattext.mobile.ui.MediaTransfer
+import app.turattext.mobile.update.AppUpdater
+import app.turattext.mobile.update.UpdateState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -51,10 +55,113 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Ядро однопоточное: фоновая синхронизация не должна пересекаться с действиями пользователя. */
     private val gate = Mutex()
 
+    private val _update = MutableStateFlow(
+        UpdateState(skippedVersion = preferences.getString(SkippedUpdateKey, null)),
+    )
+    val update = _update.asStateFlow()
+    private var updateDownload: Job? = null
+
     init {
         NativeCore.initialize(application)
         execute(CoreJson.command("snapshot"))
         startBackgroundSync()
+        startUpdateChecks(application)
+    }
+
+    // --- обновления из GitHub Releases ---------------------------------------
+
+    /**
+     * Первая проверка — вскоре после запуска, дальше раз в несколько часов. Фоновая проверка
+     * молчит об ошибках: недоступный GitHub не повод беспокоить пользователя.
+     */
+    private fun startUpdateChecks(application: Application) {
+        // До установки новой версии здесь могли остаться скачанные APK — теперь они не нужны.
+        AppUpdater.clearDownloads(application)
+        viewModelScope.launch {
+            AppUpdater.installFailures.collect { reason ->
+                _update.update { it.copy(message = "Установка не удалась: $reason") }
+            }
+        }
+        viewModelScope.launch {
+            delay(FirstUpdateCheckDelayMilliseconds)
+            while (isActive) {
+                findUpdate(manual = false)
+                delay(UpdateCheckIntervalMilliseconds)
+            }
+        }
+    }
+
+    /** Ручная проверка показывает результат и снова предлагает даже пропущенную версию. */
+    fun checkForUpdates() {
+        viewModelScope.launch { findUpdate(manual = true) }
+    }
+
+    private suspend fun findUpdate(manual: Boolean) {
+        if (_update.value.checking) return
+        _update.update { it.copy(checking = true, message = if (manual) "Проверяем релизы на GitHub…" else it.message) }
+        val result = runCatching { AppUpdater.findUpdate() }
+        val release = result.getOrNull()
+        if (manual && release != null && release.version == _update.value.skippedVersion) {
+            preferences.edit().remove(SkippedUpdateKey).apply()
+            _update.update { it.copy(skippedVersion = null) }
+        }
+        _update.update { current ->
+            current.copy(
+                checking = false,
+                available = if (result.isSuccess) release else current.available,
+                bannerDismissed = current.bannerDismissed && !(manual && release != null),
+                message = when {
+                    !manual -> current.message
+                    result.isFailure -> "Не удалось проверить обновления: ${result.exceptionOrNull()?.message}"
+                    release == null -> "У вас последняя версия."
+                    else -> "Доступна версия ${release.version}."
+                },
+            )
+        }
+    }
+
+    /** Скрывает строку над списком до следующего запуска. */
+    fun dismissUpdate() = _update.update { it.copy(bannerDismissed = true) }
+
+    /** Отказ от конкретной версии: о ней больше не напоминаем, о следующей — напомним. */
+    fun skipUpdate() {
+        val version = _update.value.available?.version ?: return
+        preferences.edit().putString(SkippedUpdateKey, version).apply()
+        _update.update { it.copy(skippedVersion = version) }
+    }
+
+    fun installUpdate() {
+        val release = _update.value.available ?: return
+        if (updateDownload?.isActive == true) return
+        val context = getApplication<Application>()
+        if (!AppUpdater.canInstallPackages(context)) {
+            _update.update {
+                it.copy(message = "Разрешите Turat устанавливать приложения, затем нажмите «Обновить» ещё раз.")
+            }
+            AppUpdater.openInstallPermissionSettings(context)
+            return
+        }
+        updateDownload = viewModelScope.launch {
+            _update.update { it.copy(downloading = 0f, message = null) }
+            try {
+                val apk = AppUpdater.download(context, release) { fraction ->
+                    _update.update { it.copy(downloading = fraction) }
+                }
+                _update.update {
+                    it.copy(downloading = null, message = "Контрольная сумма совпала. Подтвердите установку в окне системы.")
+                }
+                withContext(Dispatchers.IO) { AppUpdater.install(context, apk) }
+            } catch (cancelled: CancellationException) {
+                _update.update { it.copy(downloading = null, message = "Загрузка отменена.") }
+                throw cancelled
+            } catch (error: Exception) {
+                _update.update { it.copy(downloading = null, message = "Не удалось обновиться: ${error.message}") }
+            }
+        }
+    }
+
+    fun cancelUpdate() {
+        updateDownload?.cancel()
     }
 
     /**
@@ -384,5 +491,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val OfflineRetryIntervalMilliseconds = 6_000L
         const val TransferPollIntervalMilliseconds = 120L
         const val FailedTransferLingerMilliseconds = 4_000L
+        const val FirstUpdateCheckDelayMilliseconds = 5_000L
+        const val UpdateCheckIntervalMilliseconds = 6 * 60 * 60 * 1000L
+        const val SkippedUpdateKey = "update-skipped"
     }
 }

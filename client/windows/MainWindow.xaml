@@ -404,7 +404,7 @@
             </Grid>
 
             <!-- Список чатов -->
-            <Grid Grid.Column="1" Background="{ThemeResource TgPanel}" RowDefinitions="Auto,*"
+            <Grid Grid.Column="1" Background="{ThemeResource TgPanel}" RowDefinitions="Auto,Auto,*"
                   CornerRadius="20" BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                 <Border Height="52" Padding="10,0" VerticalAlignment="Center">
                     <Border CornerRadius="18" Background="{ThemeResource TgField}" Height="36" Padding="12,0"
@@ -435,7 +435,31 @@
                     </Border>
                 </Border>
 
-                <Grid Grid.Row="1">
+                <!-- Новая версия: одна тихая строка над списком, без всплывающих окон. -->
+                <Border x:Name="UpdateNotice" Grid.Row="1" Margin="10,0,10,8" CornerRadius="16" Padding="12,4,4,4"
+                        Background="{ThemeResource TgAccentSoft}" BorderThickness="1"
+                        BorderBrush="{ThemeResource TgGlassRim}" Visibility="Collapsed">
+                    <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                        <FontIcon Glyph="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="15"
+                                  Foreground="{ThemeResource TgAccent}" VerticalAlignment="Center" />
+                        <Button Grid.Column="1" Click="OpenUpdate_Click" Background="Transparent" BorderThickness="0"
+                                Padding="0,4" HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                                ToolTipService.ToolTip="Что нового">
+                            <StackPanel>
+                                <TextBlock x:Name="UpdateBannerTitle" Foreground="{ThemeResource TgText}" FontSize="13"
+                                           FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="Что нового и обновление" Foreground="{ThemeResource TgHint}"
+                                           FontSize="12" />
+                            </StackPanel>
+                        </Button>
+                        <Button Grid.Column="2" Style="{StaticResource TgIconButton}" Padding="6"
+                                Click="DismissUpdate_Click" ToolTipService.ToolTip="Скрыть до следующего запуска">
+                            <SymbolIcon Symbol="Clear" />
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <Grid Grid.Row="2">
                     <ListView x:Name="ChatsList" SelectionMode="Single"
                               ItemContainerStyle="{StaticResource TgChatItem}"
                               ItemTemplateSelector="{StaticResource SidebarTemplateSelector}"
@@ -810,6 +834,16 @@
                             <Button Content="Экспорт сети" Click="ExportDiscovery_Click" />
                             <Button Content="Импорт сети" Click="ImportDiscovery_Click" />
                         </StackPanel>
+
+                        <TextBlock Text="Обновления" Style="{StaticResource TgSectionTitle}" />
+                        <TextBlock x:Name="AppVersionText" Foreground="{ThemeResource TgText}" FontSize="13" />
+                        <TextBlock x:Name="UpdateCheckStatus" Foreground="{ThemeResource TgHint}" FontSize="13"
+                                   TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,6,0,0">
+                            <Button x:Name="CheckUpdatesButton" Content="Проверить обновления" Click="CheckUpdates_Click" />
+                            <Button x:Name="ShowUpdateButton" Content="Что нового" Click="OpenUpdate_Click"
+                                    Visibility="Collapsed" />
+                        </StackPanel>
                     </StackPanel>
 
                     <TextBlock x:Name="StatusText" Foreground="{ThemeResource TgHint}" FontSize="12"
@@ -890,6 +924,26 @@
             <ListView x:Name="ForwardList" Height="360" SelectionMode="Single"
                       ItemContainerStyle="{StaticResource TgChatItem}"
                       ItemTemplate="{StaticResource ChatItemTemplate}" />
+        </ContentDialog>
+
+        <!-- Обновление: ченджлог релиза и выбор — обновиться, отложить или пропустить версию. -->
+        <ContentDialog x:Name="UpdateDialog" PrimaryButtonText="Обновить"
+                       SecondaryButtonText="Пропустить эту версию" CloseButtonText="Позже"
+                       DefaultButton="Primary"
+                       PrimaryButtonClick="UpdateDialog_PrimaryButtonClick"
+                       SecondaryButtonClick="UpdateDialog_SecondaryButtonClick"
+                       CloseButtonClick="UpdateDialog_CloseButtonClick">
+            <StackPanel Spacing="8" MaxWidth="480">
+                <TextBlock x:Name="UpdateMeta" Foreground="{ThemeResource TgHint}" FontSize="12" TextWrapping="Wrap" />
+                <ScrollViewer MaxHeight="340" Padding="0,0,14,0">
+                    <TextBlock x:Name="UpdateNotes" TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                               Foreground="{ThemeResource TgText}" FontSize="13" />
+                </ScrollViewer>
+                <HyperlinkButton Content="Открыть релиз на GitHub" Click="OpenReleasePage_Click" Padding="0" />
+                <ProgressBar x:Name="UpdateProgress" Maximum="100" Visibility="Collapsed"
+                             Foreground="{ThemeResource TgAccent}" />
+                <TextBlock x:Name="UpdateStatus" Foreground="{ThemeResource TgHint}" FontSize="12" TextWrapping="Wrap" />
+            </StackPanel>
         </ContentDialog>
     </Grid>
 </Window>
