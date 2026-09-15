@@ -1,139 +1,222 @@
-# Turat 3.0 native local-first
+# Turat
 
-Turat больше не требует доступности прежнего центрального сервера. Криптографическая identity,
-история, outbox и контакты принадлежат клиенту; VPS запускает заменяемый v2 Node для mailbox,
-prekeys, routing, transparency и зашифрованных blob-объектов.
+Turat — децентрализованный (local-first) мессенджер со сквозным шифрованием (E2EE) для Windows
+и Android. Identity, история сообщений, outbox и контакты принадлежат клиенту; сервер («Node») —
+заменяемое, недоверенное хранилище opaque-данных: почтовых ящиков, предварительных ключей,
+зашифрованных вложений и подписанных записей маршрутизации.
 
-Официальный клиент автоматически использует `https://turattext.rplacefree.store` как основной
-bootstrap Node и проверяет закреплённый `NodeID`. Выбор сервера при обычном запуске не требуется;
-другие независимые Nodes можно добавить в разделе «Сеть и приватность».
+Вся бизнес- и криптологика реализована один раз, на общем Rust-ядре (`client/core`). Оба
+нативных клиента — «тонкие» UI-оболочки: они отправляют в ядро JSON-команды через узкий ABI
+(`create` / `invoke` / `destroy`) и получают в ответ неизменяемый снапшот состояния для рендеринга.
+Ни Kotlin, ни C# не дублируют доменные правила.
 
-## Готовые пакеты
+> **Ветка `liquid-glass`** — единственная, которая развивается дальше. Здесь Windows и Android
+> получили оформление в духе Liquid Glass: мягкое свечение за экранами, полупрозрачные панели,
+> пузыри и кнопки, у Windows дополнительно системный acrylic-фон окна.
 
-- `artifacts/Turat-win-x64.zip` — self-contained Windows x64 клиент.
-- `artifacts/Turat.apk` — Android 6+ APK для arm/arm64, подписанный постоянным release-key.
-- `artifacts/TuratText-VPS-Node.zip` — самодостаточный VPS Node: JAR, PostgreSQL, Caddy,
-  HTTPS/HTTP2/HTTP3, миграции, backup и подписанные обновления.
-- `artifacts/SHA256SUMS.txt` — SHA-256 всех пакетов.
+Независимый технический разбор кодовой базы (что реально подтверждено кодом, а что заявлено, но
+не найдено) — [`TURAT_TECH_REPORT.md`](TURAT_TECH_REPORT.md). Рекомендуется прочитать перед тем,
+как полагаться на Turat для чего-то серьёзного: там честно перечислены и сильные, и слабые места.
 
-Offline-ключи обновлений и Android находятся в `release-secrets/` и намеренно исключены из Git и
-VPS-архива. Сохраните этот каталог в двух независимых зашифрованных offline-копиях.
+## Статус проекта коротко
+
+- Обмен сообщениями один-на-один (E2EE, double ratchet, mailbox, вложения) — реализован и
+  покрыт юнит-тестами ядра.
+- Оба нативных клиента — функционально полные production-приложения, не прототипы.
+- Серверная часть v2 реализована по большинству функций, но почти не покрыта тестами.
+- Групповые чаты и transparency-log с Merkle-checkpoint заявлены в документации, но в клиентском
+  Rust-ядре не найдены — судя по всему, это либо будущая работа, либо частично реализовано
+  только на сервере (`RoutingV2Service`).
+- **Независимый криптографический аудит не проводился.** Ratchet и hybrid-handshake (X25519 +
+  ML-KEM-768) — собственная реализация поверх проверенных крейтов, а не готовая сборка Signal
+  Protocol/MLS.
+
+Подробности и методология — в [TURAT_TECH_REPORT.md](TURAT_TECH_REPORT.md).
 
 ## Что реализовано
 
-- производный от identity public key `UserID`, отдельные `DeviceID` и сертификаты устройств;
-- link-пакеты без копирования master identity key, root-подписанный отзыв устройств и защита
-  Directory от отката `DeviceList`;
-- подписанный зашифрованный SQLite event log, persistent outbox, at-least-once доставка и dedup;
-- text/edit/delete/reaction, delivery/read receipts и pending contact requests;
-- public contact inbox с отдельным capability, небольшими text-only запросами и proof-of-work;
-- несколько Mailbox Nodes, randomized fixed-size envelopes и приватные reply capabilities;
-- X25519 + ML-KEM-768 initial agreement, ratchet sessions и skipped-message keys;
-- непересекающиеся prekey batches для разных Nodes;
-- зашифрованные chunked attachments, несколько Blob Nodes и capability-ссылки внутри E2EE;
-- подписанные Node/Relay/Routing/Discovery descriptors, social bridge bundles и relay fallback;
-- HTTP/2 с переходом на HTTP/3/QUIC через Caddy, fixed-target TLS relay и relay-first privacy mode;
-- fast/balanced/high metadata modes с padding, batching через outbox и случайной задержкой;
-- username как изменяемый identity-подписанный указатель с явным обнаружением конфликтов;
-- append-only transparency operations, Merkle checkpoints и client-side pinning;
-- encrypted backup, перенос истории, физические `.ttenv` mesh-пакеты и периодический fetch без push;
-- group epoch control plane с fork detection и out-of-order sender-key cache;
-- 2-of-3 Ed25519 release manifests, rollback/equivocation pinning и несколько зеркал пакетов;
-- production v2-only режим: legacy API возвращает 404.
+- P-256 identity, отдельные `DeviceID`, сертификаты устройств, подписанные identity-ключом;
+- link-пакеты для новых устройств без копирования master identity key, отзыв устройств и защита
+  от отката `DeviceList`;
+- зашифрованный (на уровне значений AES-256-GCM) SQLite event log с WAL, persistent outbox,
+  at-least-once доставка и dedup;
+- text/edit/delete/reaction, delivery/read receipts, pending contact requests;
+- public contact inbox с отдельной capability, text-only запросами от незнакомцев и proof-of-work;
+- несколько Mailbox Nodes, конверты фиксированных размерных классов (padding против анализа длины
+  трафика) и раздельные capability для чтения/записи/публичного контакта;
+- X25519 + ML-KEM-768 (пост-квантовый KEM) при первом согласовании, далее double ratchet с
+  DH-обновлениями и кэшем пропущенных ключей;
+- непересекающиеся batch предварительных ключей для разных Node;
+- потоковые зашифрованные вложения (фото/видео с локальным сжатием, чанки по 512 КиБ с
+  проверкой SHA-256 каждого чанка), несколько Blob Nodes;
+- подписанный (Ed25519) Node descriptor с закреплением `NodeID` и HTTPS-only discovery;
+- 2-of-3 Ed25519 release manifests с защитой от отката/подмены версии (детали — ниже, в разделе
+  «Обновления»);
+- production v2-only режим на сервере: legacy REST/WS API из первого поколения проекта
+  отключается флагом и возвращает 404 (сам код первого поколения из репозитория не удалён —
+  подробнее в техотчёте).
 
-## Интерфейс и привычные возможности мессенджера
+## Интерфейс
 
-UI обоих клиентов повторяет Telegram: Android — Telegram for Android (боковое меню, пузыри
-с «хвостом» и временем внутри, круглая кнопка нового чата), Windows — Unigram (левый рельс
-с профилем, список чатов, контекстные меню, собственная полоса заголовка).
+UI обоих клиентов ориентируется на привычные мессенджеры: Android — на Telegram for Android
+(боковое меню, пузыри с «хвостом» и временем внутри, круглая кнопка нового чата), Windows — на
+Unigram (левый рельс с профилем, список чатов, контекстные меню, собственная полоса заголовка).
 
-Оформление выбирается в «Настройках → Тема»; выбор запоминается на устройстве. Доступны
-одиннадцать тем: Ориджин (фирменная), Гранат, Обсидиан, Чёрный, Графит, Изумрудный, Океан,
-Янтарь, Аметист и две светлые — Облачный и Пергамент.
+Доступны одиннадцать тем (Ориджин, Гранат, Обсидиан, Чёрный, Графит, Изумрудный, Океан, Янтарь,
+Аметист, Облачный, Пергамент) и Liquid Glass поверх любой из них — стеклянные значения выводятся
+из той же палитры, отдельного набора цветов не требуется.
 
-Ветка `liquid-glass` — вариант оформления в духе Liquid Glass: за экранами лежит мягкое
-свечение, собранное из акцента темы, а панели, пузыри и кнопки становятся полупрозрачным
-стеклом со светлой кромкой. Windows дополнительно включает системный acrylic, поэтому сквозь
-окно виден размытый рабочий стол. Значения стекла выводятся из той же палитры, так что все
-одиннадцать тем получают его без отдельного набора цветов.
-
-- список чатов с превью последнего события, временем, галочками и счётчиком непрочитанных;
-- закреплённые чаты, режим «без звука», отметка «непрочитано», очистка истории;
-- черновики: незаконченное сообщение сохраняется и видно в списке чатов;
-- ответы на сообщения с цитатой и переходом к оригиналу, пересылка в другой диалог;
-- реакции, редактирование, удаление, выделение нескольких сообщений и копирование;
+- список чатов с превью, временем, галочками и счётчиком непрочитанных;
+- закреплённые чаты, «без звука», «непрочитано», очистка истории, черновики;
+- ответы с цитатой, пересылка, реакции, редактирование, удаление, мультивыбор с копированием;
 - разделители дат, группировка подряд идущих сообщений одного автора;
-- глобальный поиск по чатам и по тексту всех сообщений;
-- фотография профиля: изображение уменьшается до 256 px и публикуется вместе с профилем;
-- публикация профиля и username в directory Node — иначе собеседники не найдут вас по `@username`;
-- «последняя активность» (`/v2/presence`) — подписанная запись directory, по умолчанию выключена;
-  включение и выключение управляются в «Конфиденциальности», выключение отзывает запись;
-- связь с Node поддерживается сама: клиент подключается при запуске и обновляет диалоги в фоне,
-  а кнопка синхронизации только ускоряет очередной цикл;
-- Windows: Enter отправляет сообщение, Shift+Enter переносит строку, Esc снимает правку и ответ;
-- Android: свайп вправо в диалоге возвращает к списку чатов, боковое меню открывается свайпом
-  только из самого списка.
+- глобальный поиск по чатам и тексту сообщений;
+- фото профиля, публикация профиля/username в directory Node;
+- «последняя активность» — подписанная запись directory, по умолчанию выключена;
+- Windows: Enter — отправка, Shift+Enter — перенос строки, Esc — снятие правки/ответа;
+- Android: свайп вправо в диалоге — назад к списку, боковое меню — свайпом из списка.
 
-## Установка Node на VPS
+## Структура репозитория
 
-Понадобятся домен с A/AAAA-записью на VPS, открытые TCP 80/443 и UDP 443, Docker Engine и
-Docker Compose v2.
+| Каталог | Назначение |
+|---|---|
+| `client/core` | Общее Rust-ядро: identity, крипто, зашифрованное SQLite-хранилище, local-first протокол, вложения |
+| `client/android` | Production Android-клиент (Kotlin + Jetpack Compose, JNI) |
+| `client/windows` | Production Windows-клиент (C# + WinUI 3, P/Invoke) |
+| `client/TuratText.Client`, `client/TuratText.Android` | Устаревшие клиенты первого поколения — не входят в сборку, оставлены только как источник форматов для миграции локальных данных |
+| `server` | Java/Spring Boot backend — содержит v1 (legacy) и v2 (local-first) API одновременно |
+| `docs/` | Документация; `docs/e2ee.md`, `docs/sync.md`, `docs/database.md`, `docs/api.md` описывают только устаревшую v1-модель, `docs/local-first-v2.md` и `docs/architecture.md` — актуальную v2 |
+| `tools/` | `UpdateAuthority` (подпись релизов и Android keystore), `LocalFirstSmoke` (smoke-тест протокола), генератор emoji-ассетов |
+| `scripts/build-clients.ps1` | Единый pipeline полной пересборки обоих клиентов, тестов и подписи APK |
+| `release-secrets/` | Офлайн-ключи подписи Android/обновлений — **никогда не публикуются**, исключены из Git |
 
-```bash
-unzip TuratText-VPS-Node.zip
-cd v2
-chmod +x install.sh backup.sh restore.sh
-./install.sh node.example.org admin@example.org "My Turat Node"
-```
+## Сборка из исходников
 
-Скрипт создаёт секреты с `0600`, собирает непривилегированный контейнер, запускает PostgreSQL и
-Caddy, получает TLS-сертификат и ждёт успешный `/v2/health`. Подробности: `docs/vps-bootstrap.md`.
-
-После установки просто откройте официальный клиент: основной Node подключается автоматически,
-регистрирует mailbox/prekeys и восстанавливает синхронизацию после офлайна. Старый IP не нужен.
-
-## Нативные клиенты
-
-- `client/core` — единое Rust-ядро: identity, зашифрованный SQLite/WAL, local-first состояние,
-  контакты, сообщения, вложения, backup/device-link/portable bundles, проверка Node descriptor и
-  directory-записей. Публичная граница — JSON-команды поверх C ABI; Android использует JNI,
-  Windows — P/Invoke.
-- `client/android` — Kotlin-приложение с Jetpack Compose и Material 3. Ключ локального vault
-  оборачивается Android Keystore; Rust `.so` собирается для `arm64-v8a` и `armeabi-v7a`.
-- `client/windows` — C# + XAML + WinUI 3. Ключ vault защищён DPAPI текущего пользователя; Rust
-  DLL встраивается в self-contained single-file EXE.
-
-Старые `client/TuratText.Client` и `client/TuratText.Android` не входят в production-сборку и
-оставлены только как источник форматов v2 для миграции существующих локальных данных.
-
-## Сборка и проверки
-
-Полная release-сборка обеих платформ, включая Rust-тесты, Android release-подпись и проверку APK:
+Полная release-сборка обеих платформ (Rust-тесты, Windows core + WinUI 3, Android core + APK с
+release-подписью и проверкой):
 
 ```powershell
 .\scripts\build-clients.ps1
 ```
 
-Нужны stable Rust с `cargo-ndk`, Visual Studio Build Tools (MSVC), .NET 8 SDK, Android SDK 36,
-NDK и JDK 17+. Gradle 9.6.1 закреплён wrapper-ом в Android-проекте.
+Нужны: stable Rust с `cargo-ndk`, Visual Studio Build Tools с workload C++ (MSVC), .NET 8 SDK,
+Android SDK 36 + NDK, JDK 17+. Gradle 9.6.1 закреплён wrapper-ом Android-проекта. Для подписи APK
+нужен свой Android release-keystore в `release-secrets/android/` — сгенерировать его можно так:
 
-Проверки серверной части:
+```powershell
+dotnet run --project tools/UpdateAuthority/UpdateAuthority.csproj -c Release -- init-android release-secrets/android
+```
+
+Проверка серверной части:
 
 ```powershell
 cd server
 gradle clean test bootJar
 
 cd ..
-$env:TURATTEXT_SMOKE_NODE='http://127.0.0.1:18080'
+$env:TURATTEXT_SMOKE_NODE = 'http://127.0.0.1:18080'
 dotnet run --project tools/LocalFirstSmoke/LocalFirstSmoke.csproj -c Release
 ```
 
-Android и Windows собираются из общего Rust core. Сервер использует Java 21,
-Spring Boot 3.5.16 и PostgreSQL 17.
+Готовые артефакты для этого коммита (Windows-архив, APK, серверный VPS-пакет и контрольные суммы)
+опубликованы в [Releases](../../releases) этого репозитория.
+
+## Свой Node: как захостить
+
+Node — это единственная часть Turat, которую можно (и стоит) развернуть самостоятельно. Он не
+видит открытый текст сообщений и приватные ключи — только зашифрованные конверты, зашифрованные
+чанки вложений и подписанные публичные записи (маршрутизация, username, presence). Чем больше
+независимых Node в сети, тем устойчивее и приватнее система в целом.
+
+### Минимальные требования
+
+- VPS с публичным IPv4 (IPv6 — по желанию, тогда добавьте и AAAA-запись домена).
+- Домен (поддомен) с A-записью на этот IP. Без домена не получить публичный TLS-сертификат.
+- Открытые порты: TCP 80/443 (HTTP-01/HTTPS) и UDP 443 (HTTP/3 — необязателен, но желателен;
+  блокировка UDP не мешает обычному HTTPS).
+- Docker Engine + Docker Compose v2.
+- Разумный минимум: 1 vCPU / 1 ГБ RAM хватает для одного Node с PostgreSQL и Caddy на небольшую
+  нагрузку; для собственного продакшен-узла с запасом лучше взять 2 vCPU / 2 ГБ RAM.
+
+### Установка
+
+```bash
+unzip TuratText-VPS-Node.zip     # из Releases этого репозитория
+cd v2
+chmod +x install.sh backup.sh restore.sh
+./install.sh node.example.org admin@example.org "My Turat Node"
+```
+
+`install.sh` сам генерирует секреты PostgreSQL/JWT с правами `0600`, поднимает непривилегированный
+контейнер Node, PostgreSQL 17 и Caddy, получает TLS-сертификат и ждёт успешного `/v2/health`.
+Полная пошаговая инструкция, проверки после установки, backup/restore и порядок обновлений — в
+[`docs/vps-bootstrap.md`](docs/vps-bootstrap.md).
+
+### Практические советы по хостингу собственного Node
+
+- **Провайдер.** Подойдёт любой VPS с честным исходящим трафиком без DPI-фильтрации мессенджеров;
+  для устойчивости к блокировкам лучше выбирать провайдера/юрисдикцию, никак не связанную с той,
+  где уже размещён официальный Node (`turattext.rplacefree.store`) — так вы добавляете сети
+  реальную независимость, а не второй узел за тем же провайдером.
+- **Домен отдельно от VPS.** Держите домен у отдельного регистратора/DNS-провайдера — если сам VPS
+  заблокируют по IP, вы быстро переставите A-запись на новый сервер, не теряя `NodeID` (он привязан
+  к identity-ключу Node, а не к IP или домену).
+- **`.env` и `node-data` — самое ценное на сервере.** `.env` содержит пароль PostgreSQL и JWT-секрет,
+  `node-data` — приватный Ed25519-ключ identity Node. Их компрометация не раскрывает переписку
+  пользователей (она E2EE), но позволяет выдать себя за ваш Node или уронить его. Регулярно делайте
+  `./backup.sh` и уносите зашифрованную копию за пределы VPS (другой провайдер/облако/локально) —
+  без бэкапа `node-identity` после аварии Node придётся поднимать с новым `NodeID`, и все клиенты,
+  закрепившие старый, потеряют к нему доверие.
+- **Не открывайте лишние порты.** `docker-compose.yml` уже собирает Postgres и Node во внутреннюю
+  сеть `backend` без публикации портов наружу — наружу торчит только Caddy на 80/443. Не меняйте
+  это без необходимости и не выставляйте PostgreSQL в интернет.
+- **Rate limiting и proof-of-work уже включены по умолчанию** (`TURATTEXT_V2_REGISTRATION_POW_BITS`,
+  `TURATTEXT_V2_ENVELOPE_POW_BITS`, `TURATTEXT_V2_CONTACT_POW_BITS`, `TURATTEXT_V2_REQUESTS_PER_MINUTE`
+  в `docker-compose.yml`) — это защита от спама и флуда на уровне протокола, а не UDP/SYN-флудов;
+  от объёмных DDoS-атак на сетевом уровне спасает только защита провайдера/CDN перед Caddy.
+  Понижать PoW-биты стоит только для собственных тестов, не для публичного Node.
+  `TURATTEXT_V2_TRUST_FORWARDED_FOR=true` рассчитан именно на схему «Caddy перед Node» — если
+  добавите ещё один reverse proxy или CDN перед Caddy, либо уберите его вовсе, либо явно проверьте,
+  что `X-Forwarded-For` не подделывается снаружи.
+- **Мониторинг вместо угадывания.** `/v2/health` и `/v2/node-descriptor` — открытые эндпоинты,
+  их удобно опрашивать внешним uptime-мониторингом (например, раз в 1–5 минут) и получать алерт при
+  падении. `docker compose logs -f --tail=100 node caddy` — первое, куда смотреть при инциденте.
+- **Второй независимый Node — не копия первого.** Для второго узла берите отдельный VPS/домен и
+  запускайте `install.sh` заново: он обязан сгенерировать собственный `NodeID`. Копирование
+  `node-data` первого Node на второй сервер создаст двух Node с одинаковой identity — это ломает
+  модель доверия, а не резервирует её.
+- **Обновления Node не требуют пересборки клиентов.** `docker compose pull && docker compose up -d
+  --build` — Docker-образ Node обновляется независимо от подписанных релизов Windows/Android
+  (`updates/stable/manifest.json`), которые раздаются той же Caddy, но управляются отдельно через
+  `UpdateAuthority` офлайн-ключами (см. [`docs/vps-bootstrap.md`](docs/vps-bootstrap.md), раздел
+  «Обновления»). Volumes `postgres-data`, `node-data`, `caddy-data` и файл `.env` нельзя удалять
+  при обычном обновлении.
+- **Официальный клиент подключается к вашему Node не автоматически.** По умолчанию оба клиента
+  используют `https://turattext.rplacefree.store` как bootstrap. Добавить свой Node пользователи
+  могут вручную в разделе «Сеть и приватность» — сообщите им домен вашего узла напрямую, публичного
+  автообнаружения независимых Node в клиенте нет.
+
+## Нативные клиенты
+
+- `client/core` — единое Rust-ядро: identity, зашифрованное SQLite/WAL-хранилище, local-first
+  состояние, контакты, сообщения, вложения, backup/device-link, проверка Node descriptor и
+  directory-записей. Публичная граница — JSON-команды поверх C ABI; Android использует JNI,
+  Windows — P/Invoke.
+- `client/android` — Kotlin + Jetpack Compose + Material 3. Ключ локального vault оборачивается
+  Android Keystore; Rust `.so` собирается для `arm64-v8a` и `armeabi-v7a`.
+- `client/windows` — C# + XAML + WinUI 3 на стабильном (не experimental) Windows App SDK 2.4.0.
+  Ключ vault защищён DPAPI текущего пользователя. На момент этого README `PublishSingleFile` в
+  `.csproj` выключен (`false`), поэтому публикуемый пакет — не единый EXE-файл, а каталог с
+  зависимостями рядом (см. `TURAT_TECH_REPORT.md`, раздел 5.4).
+
+Старые `client/TuratText.Client` и `client/TuratText.Android` не входят в production-сборку и
+оставлены только как источник форматов v2 для миграции существующих локальных данных.
 
 ## Граница безопасности
 
-Реализация функционально завершает v2 vertical slice, но ещё не проходила независимый
-криптографический аудит. Ratchet и group-epoch слой являются собственной реализацией, а не
-сертифицированной сборкой Signal Protocol/MLS. До публичного high-risk запуска необходимы внешний
-аудит, fuzzing подписываемых форматов и нагрузочные испытания нескольких независимых Nodes.
+Реализация функционально завершает v2 vertical slice для обмена один-на-один, но **не проходила
+независимый криптографический аудит**. Ratchet и заявленный group-epoch слой — собственная
+реализация, а не сертифицированная сборка Signal Protocol/MLS; групповой control plane к тому же
+не подтверждён в клиентском Rust-коде на момент последнего технического разбора (см.
+`TURAT_TECH_REPORT.md`). До любого публичного high-risk запуска нужны внешний аудит, fuzzing
+подписываемых форматов и нагрузочные испытания нескольких независимых Node.
