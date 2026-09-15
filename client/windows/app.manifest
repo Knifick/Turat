@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="3.0.0.0" name="Turat.Windows"/>
+  <assemblyIdentity version="3.1.0.0" name="Turat.Windows"/>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
       <supportedOS Id="{4f476546-937e-4249-90d0-e04c6f6a3b1f}"/>
