@@ -74,6 +74,7 @@ fun DrawerContent(
     online: Boolean,
     onOpenThemes: () -> Unit,
     onNewChat: () -> Unit,
+    onNewGroup: () -> Unit,
     onSettings: () -> Unit,
     onSync: () -> Unit,
 ) {
@@ -126,6 +127,7 @@ fun DrawerContent(
             )
         }
         DrawerRow(R.drawable.ic_edit, "Новый диалог", onNewChat)
+        DrawerRow(R.drawable.ic_group, "Новая группа", onNewGroup)
         DrawerRow(
             R.drawable.ic_sync,
             if (online) "Обновить сейчас" else "Подключиться к Node",
@@ -413,9 +415,13 @@ fun NewChatScreen(
     busy: Boolean,
     error: String?,
     onCreate: (String) -> Unit,
+    onNewGroup: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     TelegramScreen("Новый диалог", onBack) {
+        item {
+            SectionRow(R.drawable.ic_group, "Создать группу", "до 100 участников · сквозное шифрование", onClick = onNewGroup)
+        }
         item {
             Text(
                 "Введите @username собеседника или его полный UserID — Turat найдёт его в сети и создаст защищённый диалог.",
@@ -457,7 +463,7 @@ fun NewChatScreen(
 @Composable
 fun ForwardScreen(state: AppSnapshot, onBack: () -> Unit, onPick: (String) -> Unit) {
     val colors = Telegram.colors
-    val targets = state.chats.filterNot { it.contact.pending }
+    val targets = state.chats.filter { it.canWrite }
     TelegramScreen("Переслать", onBack) {
         if (targets.isEmpty()) {
             item {
@@ -487,7 +493,8 @@ fun ForwardScreen(state: AppSnapshot, onBack: () -> Unit, onPick: (String) -> Un
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        chat.contact.username?.let { "@$it" } ?: shortId(chat.contact.userId),
+                        if (chat.isGroup) membersLabel(chat.memberCount)
+                        else chat.contact.username?.let { "@$it" } ?: shortId(chat.contact.userId),
                         color = colors.hint,
                         fontSize = 13.sp,
                         maxLines = 1,

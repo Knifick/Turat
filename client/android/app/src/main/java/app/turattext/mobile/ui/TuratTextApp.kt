@@ -78,6 +78,8 @@ class AppActions(
     val command: (String, ((Boolean) -> Unit)?) -> Unit,
     val pickAttachment: () -> Unit,
     val pickAvatar: () -> Unit,
+    /** Выбор фото группы по её GroupID. */
+    val pickGroupAvatar: (String) -> Unit,
     /** Сохраняет вложение сообщения в выбранный пользователем файл. */
     val saveAttachment: (Message) -> Unit,
     /** Прерывает начатую передачу вложения по идентификатору задачи. */
@@ -100,6 +102,9 @@ private sealed interface Overlay {
     data object Themes : Overlay
     data object Profile : Overlay
     data object Update : Overlay
+    data object NewGroup : Overlay
+    data object GroupInfo : Overlay
+    data object AddMembers : Overlay
     data class Forward(val eventIds: Set<String>) : Overlay
 }
 
@@ -165,6 +170,11 @@ fun TuratTextApp(
                             scope.launch { drawerState.close() }
                             newChatSubmitted = false
                             overlay = Overlay.NewChat
+                        },
+                        onNewGroup = {
+                            scope.launch { drawerState.close() }
+                            newChatSubmitted = false
+                            overlay = Overlay.NewGroup
                         },
                         onSettings = { scope.launch { drawerState.close() }; overlay = Overlay.Settings },
                         onSync = { scope.launch { drawerState.close() }; actions.sync() },
@@ -243,7 +253,9 @@ fun TuratTextApp(
                         downloads = downloads,
                         showBack = !wide,
                         onBack = onBack,
-                        onOpenProfile = { overlay = Overlay.Profile },
+                        onOpenProfile = {
+                            overlay = if (state.selectedChat?.isGroup == true) Overlay.GroupInfo else Overlay.Profile
+                        },
                         onForward = { overlay = Overlay.Forward(it) },
                         modifier = modifier,
                     )
@@ -312,6 +324,61 @@ fun TuratTextApp(
                         if (added) overlay = Overlay.None
                     }
                 },
+                onNewGroup = {
+                    newChatSubmitted = false
+                    overlay = Overlay.NewGroup
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.NewGroup) {
+            NewGroupScreen(
+                state = state,
+                busy = busy,
+                error = if (newChatSubmitted && !busy) state.statusMessage else null,
+                onBack = { overlay = Overlay.None },
+                onCreate = { name, members ->
+                    newChatSubmitted = true
+                    actions.command(createGroupCommand(name, members)) { created ->
+                        if (created) overlay = Overlay.None
+                    }
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.GroupInfo && state.group != null) {
+            GroupInfoScreen(
+                state = state,
+                actions = actions,
+                onBack = { overlay = Overlay.None },
+                onAddMembers = { overlay = Overlay.AddMembers },
+                onOpenChat = { member ->
+                    overlay = Overlay.None
+                    if (member.isContact) {
+                        actions.selectContact(member.userId)
+                    } else {
+                        // Незнакомцу уходит обычный запрос на общение в его публичный ящик.
+                        actions.command(
+                            CoreJson.command("add_contact", "query" to member.userId, "display_name" to member.displayName),
+                            null,
+                        )
+                    }
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.AddMembers && state.group != null) {
+            AddMembersScreen(
+                state = state,
+                busy = busy,
+                onBack = { overlay = Overlay.GroupInfo },
+                onAdd = { ids ->
+                    val groupId = state.group?.groupId ?: return@AddMembersScreen
+                    actions.command(
+                        CoreJson.command(
+                            "add_group_members",
+                            "group_id" to groupId,
+                            "user_ids" to org.json.JSONArray(ids),
+                        ),
+                    ) { added -> if (added) overlay = Overlay.GroupInfo }
+                },
             )
         }
         OverlayScreen(overlay is Overlay.Settings) {
@@ -373,7 +440,11 @@ fun TuratTextApp(
     }
 
     BackHandler(enabled = overlay != Overlay.None) {
-        overlay = if (overlay is Overlay.Themes) Overlay.Settings else Overlay.None
+        overlay = when (overlay) {
+            is Overlay.Themes -> Overlay.Settings
+            is Overlay.AddMembers -> Overlay.GroupInfo
+            else -> Overlay.None
+        }
     }
 }
 

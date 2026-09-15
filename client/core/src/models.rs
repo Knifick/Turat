@@ -144,6 +144,147 @@ pub struct Message {
     /// Имя автора оригинала для пересланных сообщений.
     #[serde(default)]
     pub forwarded_from: Option<String>,
+    /// Служебная отметка группы: «Алиса добавила Боба». Клиент рисует её по центру
+    /// ленты, и с ней нельзя ничего сделать — ни ответить, ни переслать.
+    #[serde(default)]
+    pub service: bool,
+    /// Кто какую реакцию поставил. В группе реакций от разных людей много, и снятие
+    /// своей не должно убирать чужую; `reactions` выводится из этого списка.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reaction_marks: Vec<ReactionMark>,
+    /// Имя автора для ленты группы. Заполняется только в снимке и не хранится.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactionMark {
+    pub user_id: String,
+    pub reaction: String,
+}
+
+/// Роль в группе. Порядок значим: сравнение ролей отвечает на вопрос «кто старше».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupRole {
+    Member,
+    Admin,
+    Owner,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMember {
+    pub user_id: String,
+    /// Имя, под которым участника добавили. Если он есть в контактах, клиент видит
+    /// своё имя контакта, а это — запасное.
+    pub display_name: String,
+    pub role: GroupRole,
+    pub added_by: String,
+    pub added_at_unix_milliseconds: i64,
+}
+
+/// Что разрешено рядовым участникам. Администраторы и владелец могут всё это всегда.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPermissions {
+    #[serde(default)]
+    pub members_can_invite: bool,
+    #[serde(default)]
+    pub members_can_edit_info: bool,
+}
+
+/// Полное состояние группы. Уходит участникам целиком при каждом изменении, а номер
+/// `epoch` строго растёт: получатель проверяет разницу с тем, что знает сам.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupState {
+    pub version: i32,
+    pub group_id: String,
+    pub epoch: i64,
+    pub name: String,
+    pub about: String,
+    pub avatar_base64: Option<String>,
+    pub created_by: String,
+    pub created_at_unix_milliseconds: i64,
+    pub members: Vec<GroupMember>,
+    pub permissions: GroupPermissions,
+    pub updated_by: String,
+    pub updated_at_unix_milliseconds: i64,
+}
+
+/// Группа в локальном хранилище: состояние плюс то, что знает только это устройство.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupRecord {
+    pub state: GroupState,
+    /// Приглашение ещё не принято: писать в группу нельзя, квитанции не уходят.
+    #[serde(default)]
+    pub pending_invite: bool,
+    #[serde(default)]
+    pub invited_by: Option<String>,
+    /// Пользователь вышел или его исключили: история остаётся, писать нельзя.
+    #[serde(default)]
+    pub left: bool,
+    /// Чат удалён из списка. Запись остаётся надгробием: старые изменения группы,
+    /// ещё летящие по сети, не должны воскрешать её как новое приглашение.
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub draft: String,
+    #[serde(default)]
+    pub manual_unread: bool,
+    /// Участники, от которых пришло хоть одно подписанное событие этой группы. Список
+    /// из приглашения — лишь заявление пригласившего, а это — подтверждение.
+    #[serde(default)]
+    pub confirmed_members: Vec<String>,
+    #[serde(default)]
+    pub joined_at_unix_milliseconds: i64,
+}
+
+/// Участник в карточке группы: имя уже разрешено через контакты.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMemberView {
+    pub user_id: String,
+    pub display_name: String,
+    pub avatar_base64: Option<String>,
+    pub role: GroupRole,
+    pub is_self: bool,
+    pub is_contact: bool,
+    pub confirmed: bool,
+    pub added_by_name: String,
+}
+
+/// Карточка открытой группы и то, что текущему пользователю в ней разрешено.
+/// Права считает ядро: клиент только прячет недоступные кнопки.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupView {
+    pub group_id: String,
+    pub name: String,
+    pub about: String,
+    pub avatar_base64: Option<String>,
+    pub epoch: i64,
+    pub created_by: String,
+    pub created_at_unix_milliseconds: i64,
+    pub my_role: Option<GroupRole>,
+    pub pending_invite: bool,
+    pub invited_by_name: Option<String>,
+    pub left: bool,
+    pub permissions: GroupPermissions,
+    pub members: Vec<GroupMemberView>,
+    pub can_send: bool,
+    pub can_invite: bool,
+    pub can_edit_info: bool,
+    pub can_remove_members: bool,
+    pub can_manage_admins: bool,
+    pub can_delete_messages: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +335,12 @@ pub struct Chat {
     pub last_message_delivered: bool,
     pub last_message_read: bool,
     pub unread_count: u32,
+    /// Строка — группа: `userId` тогда содержит GroupID (`ttg1-…`).
+    pub is_group: bool,
+    pub member_count: u32,
+    pub group_role: Option<GroupRole>,
+    /// Пользователь покинул группу или исключён: писать в неё нельзя.
+    pub group_left: bool,
 }
 
 /// Результат глобального поиска по всем диалогам.
@@ -223,6 +370,8 @@ pub struct Snapshot {
     pub onboarding_required: bool,
     pub search_query: String,
     pub search_results: Vec<SearchHit>,
+    /// Карточка выбранной группы; у личного диалога пусто.
+    pub group: Option<GroupView>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,6 +555,51 @@ pub enum Command {
     },
     RevokeDevice {
         device_id: String,
+    },
+    /// Новая группа из принятых контактов. Возвращает `groupId`.
+    CreateGroup {
+        name: String,
+        #[serde(default)]
+        about: String,
+        #[serde(default)]
+        avatar_base64: Option<String>,
+        #[serde(default)]
+        member_ids: Vec<String>,
+    },
+    AddGroupMembers {
+        group_id: String,
+        user_ids: Vec<String>,
+    },
+    RemoveGroupMember {
+        group_id: String,
+        user_id: String,
+    },
+    /// Назначение или снятие администратора; владельца так не сменить.
+    SetGroupRole {
+        group_id: String,
+        user_id: String,
+        role: GroupRole,
+    },
+    TransferGroupOwnership {
+        group_id: String,
+        user_id: String,
+    },
+    UpdateGroupInfo {
+        group_id: String,
+        name: String,
+        #[serde(default)]
+        about: String,
+        #[serde(default)]
+        avatar_base64: Option<String>,
+    },
+    SetGroupPermissions {
+        group_id: String,
+        members_can_invite: bool,
+        members_can_edit_info: bool,
+    },
+    /// Выход из группы с сохранением истории. Удаление чата группы — `delete_contact`.
+    LeaveGroup {
+        group_id: String,
     },
 }
 

@@ -185,6 +185,108 @@ fn edits_and_reactions_follow_the_message() {
     assert_eq!(bob.conversation(&alice_id)[0]["deleted"], true);
 }
 
+fn call_ok(client: &mut Client, command: Value) -> Value {
+    let response = client.core.call(&command);
+    assert_eq!(response["ok"], true, "{command}: {response}");
+    response
+}
+
+fn texts(messages: &[Value]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message["service"] != true)
+        .map(|message| message["text"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// Группа из трёх человек, где двое участников друг с другом не знакомы: приглашение,
+/// вступление, переписка, назначение администратора и исключение.
+#[test]
+#[ignore = "нужен запущенный Node: TURAT_TEST_NODE"]
+fn a_group_reaches_every_member_and_forgets_the_removed() {
+    let Some(node) = node_url() else {
+        panic!("Задайте TURAT_TEST_NODE");
+    };
+    let mut alice = Client::open("Алиса", &node);
+    let mut bob = Client::open("Боб", &node);
+    let mut carol = Client::open("Кэрол", &node);
+    for client in [&mut alice, &mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+    }
+    let (alice_id, bob_id, carol_id) = (alice.user_id.clone(), bob.user_id.clone(), carol.user_id.clone());
+
+    // Алиса знакома с обоими, Боб и Кэрол — нет.
+    for (peer, peer_id) in [(&mut bob, bob_id.clone()), (&mut carol, carol_id.clone())] {
+        alice.add(&peer_id);
+        assert_eq!(alice.send(&peer_id, "привет")["ok"], true);
+        assert_eq!(peer.sync()["ok"], true);
+        call_ok(peer, json!({"command": "accept_contact", "user_id": alice_id}));
+    }
+    assert_eq!(alice.sync()["ok"], true);
+
+    let created = call_ok(&mut alice, json!({
+        "command": "create_group",
+        "name": "Тройка",
+        "member_ids": [bob_id, carol_id],
+    }));
+    let group_id = created["value"]["groupId"].as_str().unwrap().to_owned();
+    assert_eq!(alice.sync()["ok"], true);
+
+    for client in [&mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+        let invited = client.conversation(&group_id);
+        assert!(!invited.is_empty(), "приглашение не дошло");
+        let snapshot = call_ok(client, json!({"command": "select_contact", "user_id": group_id}));
+        assert_eq!(snapshot["snapshot"]["group"]["pendingInvite"], true);
+        call_ok(client, json!({"command": "accept_contact", "user_id": group_id}));
+    }
+    // Вступление Боба доходит до незнакомой ему Кэрол через её публичный ящик,
+    // ответ несёт её личный адрес обратно.
+    for _ in 0..2 {
+        for client in [&mut alice, &mut bob, &mut carol] {
+            assert_eq!(client.sync()["ok"], true);
+        }
+    }
+
+    call_ok(&mut alice, json!({"command": "send_text", "user_id": group_id, "text": "всем от Алисы"}));
+    call_ok(&mut bob, json!({"command": "send_text", "user_id": group_id, "text": "всем от Боба"}));
+    for client in [&mut alice, &mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+    }
+    let seen_by_carol = texts(&carol.conversation(&group_id));
+    assert!(seen_by_carol.contains(&"всем от Алисы".to_owned()), "{seen_by_carol:?}");
+    assert!(seen_by_carol.contains(&"всем от Боба".to_owned()), "{seen_by_carol:?}");
+    let bob_message = carol
+        .conversation(&group_id)
+        .into_iter()
+        .find(|message| message["text"] == "всем от Боба")
+        .unwrap();
+    // Незнакомый Кэрол Боб подписан так, как его добавила Алиса.
+    assert_eq!(bob_message["senderName"], "Собеседник");
+
+    call_ok(&mut alice, json!({"command": "set_group_role", "group_id": group_id, "user_id": bob_id, "role": "admin"}));
+    assert_eq!(bob.sync()["ok"], true);
+    let bob_view = call_ok(&mut bob, json!({"command": "select_contact", "user_id": group_id}));
+    assert_eq!(bob_view["snapshot"]["group"]["myRole"], "admin");
+    assert_eq!(bob_view["snapshot"]["group"]["canRemoveMembers"], true);
+
+    call_ok(&mut bob, json!({"command": "remove_group_member", "group_id": group_id, "user_id": carol_id}));
+    for client in [&mut alice, &mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+    }
+    let carol_view = call_ok(&mut carol, json!({"command": "select_contact", "user_id": group_id}));
+    assert_eq!(carol_view["snapshot"]["group"]["left"], true, "{carol_view}");
+    let alice_view = call_ok(&mut alice, json!({"command": "select_contact", "user_id": group_id}));
+    assert_eq!(alice_view["snapshot"]["group"]["members"].as_array().unwrap().len(), 2);
+
+    call_ok(&mut alice, json!({"command": "send_text", "user_id": group_id, "text": "уже без Кэрол"}));
+    for client in [&mut alice, &mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+    }
+    assert!(texts(&bob.conversation(&group_id)).contains(&"уже без Кэрол".to_owned()));
+    assert!(!texts(&carol.conversation(&group_id)).contains(&"уже без Кэрол".to_owned()));
+}
+
 /// Файл уезжает в blob-хранилище и появляется у собеседника на диске.
 #[test]
 #[ignore = "нужен запущенный Node: TURAT_TEST_NODE"]

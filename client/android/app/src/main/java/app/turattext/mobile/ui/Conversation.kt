@@ -87,7 +87,14 @@ sealed interface FeedItem {
         val message: Message,
         val first: Boolean,
         val last: Boolean,
+        /** В группе над первой репликой серии подписан автор. */
+        val showSender: Boolean = false,
     ) : FeedItem {
+        override val key get() = message.eventId
+    }
+
+    /** Служебная отметка группы: «Алиса добавила Боба». */
+    data class Service(val message: Message) : FeedItem {
         override val key get() = message.eventId
     }
 
@@ -98,10 +105,16 @@ sealed interface FeedItem {
 }
 
 /** Telegram склеивает подряд идущие сообщения одного автора в группу с одним «хвостом». */
-fun buildFeed(messages: List<Message>, uploads: List<PendingUpload> = emptyList()): List<FeedItem> {
+fun buildFeed(
+    messages: List<Message>,
+    uploads: List<PendingUpload> = emptyList(),
+    group: Boolean = false,
+): List<FeedItem> {
     val items = mutableListOf<FeedItem>()
     val grouped = { left: Message?, right: Message ->
-        left != null && left.outgoing == right.outgoing &&
+        left != null && !left.service && !right.service &&
+            left.outgoing == right.outgoing &&
+            left.senderUserId == right.senderUserId &&
             left.forwardedFrom == right.forwardedFrom &&
             isSameDay(left.createdAt, right.createdAt) &&
             kotlin.math.abs(right.createdAt - left.createdAt) < 10 * 60_000L
@@ -113,9 +126,13 @@ fun buildFeed(messages: List<Message>, uploads: List<PendingUpload> = emptyList(
         if (newDay) {
             items += FeedItem.Day(dateSeparator(message.createdAt), "day-${message.eventId}")
         }
+        if (message.service) {
+            items += FeedItem.Service(message)
+            return@forEachIndexed
+        }
         val first = newDay || !grouped(previous, message) || message.replyToEventId != null
         val last = next == null || !grouped(message, next) || next.replyToEventId != null
-        items += FeedItem.Bubble(message, first, last)
+        items += FeedItem.Bubble(message, first, last, showSender = group && first && !message.outgoing)
     }
     uploads.forEach { items += FeedItem.Uploading(it) }
     return items
@@ -148,10 +165,20 @@ fun ConversationPane(
     var editingId by remember(contact.userId) { mutableStateOf<String?>(null) }
     var replyToId by remember(contact.userId) { mutableStateOf<String?>(null) }
     var headerMenu by remember { mutableStateOf(false) }
+    var confirmGroupDelete by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
+    val chat = state.selectedChat
+    val isGroup = chat?.isGroup == true
+    val canWrite = chat?.canWrite != false
     val mine = remember(uploads, contact.userId) { uploads.filter { it.userId == contact.userId } }
-    val feed = remember(state.messages, mine) { buildFeed(state.messages, mine) }
+    val feed = remember(state.messages, mine, isGroup) { buildFeed(state.messages, mine, isGroup) }
+    val subtitle = when {
+        chat == null || !chat.isGroup -> presenceOf(contact)
+        chat.groupLeft -> "вы не участник группы"
+        contact.pending -> "приглашение в группу"
+        else -> membersLabel(chat.memberCount)
+    }
     var viewing by remember(contact.userId) { mutableStateOf<Message?>(null) }
     val messageById = remember(state.messages) { state.messages.associateBy { it.eventId } }
 
@@ -221,6 +248,8 @@ fun ConversationPane(
                 if (selected.isEmpty()) {
                     ConversationHeader(
                         contact = contact,
+                        subtitle = subtitle,
+                        isGroup = isGroup,
                         showBack = showBack,
                         onBack = onBack,
                         onOpenProfile = onOpenProfile,
@@ -228,7 +257,9 @@ fun ConversationPane(
                         onMenu = { headerMenu = it },
                         onClearHistory = { actions.clearHistory(contact.userId) },
                         onMute = { actions.setMuted(contact.userId, !contact.muted) },
-                        onDeleteChat = { actions.deleteContact(contact.userId) },
+                        onDeleteChat = {
+                            if (isGroup) confirmGroupDelete = true else actions.deleteContact(contact.userId)
+                        },
                     )
                 } else {
                     SelectionBar(
@@ -258,8 +289,11 @@ fun ConversationPane(
                 if (feed.isEmpty()) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         ServicePill(
-                            if (contact.pending) "Собеседник ждёт вашего ответа"
-                            else "Сообщения защищены сквозным шифрованием",
+                            when {
+                                contact.pending && isGroup -> "Вас пригласили в группу"
+                                contact.pending -> "Собеседник ждёт вашего ответа"
+                                else -> "Сообщения защищены сквозным шифрованием"
+                            },
                         )
                     }
                 }
@@ -272,6 +306,12 @@ fun ConversationPane(
                         when (item) {
                             is FeedItem.Day -> Box(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                                 ServicePill(item.label, Modifier.align(Alignment.Center))
+                            }
+
+                            is FeedItem.Service -> Box(
+                                Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 5.dp),
+                            ) {
+                                ServicePill(item.message.text, Modifier.align(Alignment.Center))
                             }
 
                             is FeedItem.Bubble -> MessageRow(
@@ -307,7 +347,7 @@ fun ConversationPane(
 
             if (selected.isNotEmpty()) {
                 SelectionActionsBar(
-                    canReply = selected.size == 1 &&
+                    canReply = canWrite && selected.size == 1 &&
                         state.messages.any { it.eventId == selected.first() && !it.deleted },
                     onReply = {
                         replyToId = selected.single()
@@ -321,9 +361,16 @@ fun ConversationPane(
                 )
             } else if (contact.pending) {
                 PendingBar(
+                    text = when {
+                        !isGroup -> "Этот пользователь хочет начать переписку"
+                        state.group?.invitedByName != null -> "${state.group.invitedByName} приглашает вас в группу"
+                        else -> "Вас пригласили в группу"
+                    },
                     onAccept = { actions.acceptContact(contact.userId) },
                     onReject = { actions.rejectContact(contact.userId) },
                 )
+            } else if (chat?.groupLeft == true) {
+                GroupLeftBar(onDelete = { confirmGroupDelete = true })
             } else {
                 Column(Modifier.glass(colors, GlassShape.Footer, raised = true).imePadding()) {
                     val replied = replyToId?.let(messageById::get)
@@ -337,7 +384,7 @@ fun ConversationPane(
                     } else if (replied != null) {
                         ComposerBanner(
                             icon = R.drawable.ic_reply,
-                            title = if (replied.outgoing) "Вы" else contact.displayName,
+                            title = if (replied.outgoing) "Вы" else replied.senderName ?: contact.displayName,
                             text = quoteOf(replied),
                             onCancel = { replyToId = null },
                         )
@@ -361,6 +408,32 @@ fun ConversationPane(
                 onSave = { message?.let(actions.saveAttachment) },
             )
     }
+    }
+    if (confirmGroupDelete) {
+        GroupDeleteDialog(chat, onDismiss = { confirmGroupDelete = false }) {
+            actions.deleteContact(contact.userId)
+        }
+    }
+}
+
+/** Из группы вышли или исключили: история остаётся, писать нельзя. */
+@Composable
+private fun GroupLeftBar(onDelete: () -> Unit) {
+    val colors = Telegram.colors
+    Column(Modifier.fillMaxWidth().glass(colors, GlassShape.Footer, raised = true).navigationBarsPadding()) {
+        Text(
+            "Вы больше не участник этой группы",
+            Modifier.fillMaxWidth().padding(top = 10.dp),
+            color = colors.hint,
+            fontSize = 13.sp,
+            textAlign = TextAlign.Center,
+        )
+        Box(
+            Modifier.fillMaxWidth().height(48.dp).clickable(onClick = onDelete),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("УДАЛИТЬ ЧАТ", color = colors.danger, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        }
     }
 }
 
@@ -443,6 +516,8 @@ private fun ScrollDownButton(visible: Boolean, onClick: () -> Unit, modifier: Mo
 @Composable
 private fun ConversationHeader(
     contact: Contact,
+    subtitle: String,
+    isGroup: Boolean,
     showBack: Boolean,
     onBack: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -494,7 +569,7 @@ private fun ConversationHeader(
                     }
                 }
                 Text(
-                    presenceOf(contact),
+                    subtitle,
                     color = if (isOnline(contact)) colors.accent else colors.hint,
                     fontSize = 13.sp,
                     maxLines = 1,
@@ -506,13 +581,19 @@ private fun ConversationHeader(
                 Icon(painterResource(R.drawable.ic_more), "Ещё", Modifier.size(20.dp), colors.text)
             }
             DropdownMenu(menuOpen, { onMenu(false) }) {
-                MenuRow(R.drawable.ic_person, "Профиль") { onMenu(false); onOpenProfile() }
+                MenuRow(
+                    if (isGroup) R.drawable.ic_group else R.drawable.ic_person,
+                    if (isGroup) "О группе" else "Профиль",
+                ) { onMenu(false); onOpenProfile() }
                 MenuRow(
                     if (contact.muted) R.drawable.ic_unmute else R.drawable.ic_mute,
                     if (contact.muted) "Включить звук" else "Отключить звук",
                 ) { onMenu(false); onMute() }
                 MenuRow(R.drawable.ic_broom, "Очистить историю") { onMenu(false); onClearHistory() }
-                MenuRow(R.drawable.ic_delete, "Удалить чат", danger = true) { onMenu(false); onDeleteChat() }
+                MenuRow(R.drawable.ic_delete, if (isGroup) "Удалить группу" else "Удалить чат", danger = true) {
+                    onMenu(false)
+                    onDeleteChat()
+                }
             }
         }
     }
@@ -674,6 +755,7 @@ private fun MessageRow(
                     message = message,
                     repliedTo = repliedTo,
                     contactName = contactName,
+                    showSender = item.showSender,
                     first = item.first,
                     last = item.last,
                     transfer = transfer,
@@ -709,6 +791,7 @@ private fun MessageBubble(
     message: Message,
     repliedTo: Message?,
     contactName: String,
+    showSender: Boolean,
     first: Boolean,
     last: Boolean,
     transfer: MediaTransfer?,
@@ -769,6 +852,19 @@ private fun MessageBubble(
             .padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
     ) {
         Column {
+            if (showSender && !outgoing) {
+                message.senderName?.let { author ->
+                    Text(
+                        author,
+                        color = colors.accent,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(bottom = 2.dp),
+                    )
+                }
+            }
             message.forwardedFrom?.let { author ->
                 Text(
                     "Переслано от $author",
@@ -792,7 +888,7 @@ private fun MessageBubble(
                     Box(Modifier.width(2.dp).height(34.dp).background(accentInBubble))
                     Column(Modifier.padding(start = 6.dp, top = 2.dp, bottom = 2.dp)) {
                         Text(
-                            if (repliedTo.outgoing) "Вы" else contactName,
+                            if (repliedTo.outgoing) "Вы" else repliedTo.senderName ?: contactName,
                             color = accentInBubble,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium,
@@ -968,11 +1064,11 @@ private fun Composer(
 }
 
 @Composable
-private fun PendingBar(onAccept: () -> Unit, onReject: () -> Unit) {
+private fun PendingBar(text: String, onAccept: () -> Unit, onReject: () -> Unit) {
     val colors = Telegram.colors
     Column(Modifier.fillMaxWidth().glass(colors, GlassShape.Footer, raised = true).navigationBarsPadding()) {
         Text(
-            "Этот пользователь хочет начать переписку",
+            text,
             Modifier.fillMaxWidth().padding(top = 10.dp),
             color = colors.hint,
             fontSize = 13.sp,

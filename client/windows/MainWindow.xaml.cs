@@ -253,6 +253,7 @@ public sealed partial class MainWindow : Window
 
             if (SettingsPage.Visibility == Visibility.Visible) FillSettings();
             if (ProfilePage.Visibility == Visibility.Visible) FillProfile();
+            if (GroupPage.Visibility == Visibility.Visible) FillGroupPage();
 
             if (snapshot.OnboardingRequired && !_onboardingShown)
             {
@@ -366,11 +367,7 @@ public sealed partial class MainWindow : Window
             if (await ConfirmAsync("Очистить историю?", "Локальные сообщения этого диалога будут удалены."))
                 await ExecuteAsync(new { command = "clear_history", user_id = chat.UserId });
         }));
-        menu.Items.Add(MenuItem("Удалить чат", "", async () =>
-        {
-            if (await ConfirmAsync("Удалить диалог?", "Локальная история этого диалога будет удалена."))
-                await ExecuteAsync(new { command = "delete_contact", user_id = chat.UserId });
-        }));
+        AddDeleteChatItems(menu, chat);
         ShowMenu(menu, sender, args);
     }
 
@@ -387,8 +384,14 @@ public sealed partial class MainWindow : Window
             : Visibility.Collapsed;
         MessagesList.Visibility = hasChat ? Visibility.Visible : Visibility.Collapsed;
         EmptyConversation.Visibility = hasChat ? Visibility.Collapsed : Visibility.Visible;
-        Composer.Visibility = hasChat && chat!.PendingApproval == false ? Visibility.Visible : Visibility.Collapsed;
+        Composer.Visibility = hasChat && chat!.CanWrite ? Visibility.Visible : Visibility.Collapsed;
         PendingBar.Visibility = hasChat && chat!.PendingApproval ? Visibility.Visible : Visibility.Collapsed;
+        GroupLeftBar.Visibility = hasChat && chat!.GroupLeft ? Visibility.Visible : Visibility.Collapsed;
+        PendingBarText.Text = chat is { IsGroup: true }
+            ? _snapshot.Group?.InvitedByName is string inviter
+                ? $"{inviter} приглашает вас в группу"
+                : "Вас пригласили в группу"
+            : "Этот пользователь хочет начать переписку";
 
         if (chat is null)
         {
@@ -440,9 +443,11 @@ public sealed partial class MainWindow : Window
             MessageModel? next = index + 1 < messages.Count ? messages[index + 1] : null;
             message.FirstInGroup = newDay || !Grouped(previous, message) || message.ReplyToEventId is not null;
             message.LastInGroup = next is null || !Grouped(message, next) || next.ReplyToEventId is not null;
+            // В группе у каждой серии чужих сообщений подписан автор.
+            message.ShowSender = chat.IsGroup && !message.Outgoing && !message.Service && message.FirstInGroup;
             if (message.ReplyToEventId is string replyId && byId.TryGetValue(replyId, out MessageModel? replied))
             {
-                message.ReplyAuthor = replied.Outgoing ? "Вы" : chat.DisplayName;
+                message.ReplyAuthor = replied.Outgoing ? "Вы" : replied.SenderName ?? chat.DisplayName;
                 message.ReplyText = replied.Quote;
             }
             _feed.Add(message);
@@ -487,10 +492,13 @@ public sealed partial class MainWindow : Window
     private static string FeedSignature(ChatModel chat, IReadOnlyList<MessageModel> messages)
     {
         var builder = new StringBuilder(messages.Count * 48);
-        builder.Append(chat.UserId).Append('|').Append(chat.DisplayName).AppendLine();
+        builder.Append(chat.UserId).Append('|').Append(chat.DisplayName).Append('|')
+            .Append(chat.IsGroup ? '1' : '0').AppendLine();
         foreach (MessageModel message in messages)
         {
             builder.Append(message.EventId).Append(FieldSeparator)
+                .Append(message.Service ? '1' : '0')
+                .Append(message.SenderName).Append(FieldSeparator)
                 .Append(message.Text).Append(FieldSeparator)
                 .Append(message.CreatedAtUnixMilliseconds).Append(FieldSeparator)
                 .Append(message.Edited ? '1' : '0')
@@ -541,7 +549,9 @@ public sealed partial class MainWindow : Window
     /// <summary>Подряд идущие сообщения одного автора склеиваются в группу.</summary>
     private static bool Grouped(MessageModel? left, MessageModel right) =>
         left is not null
+        && !left.Service && !right.Service
         && left.Outgoing == right.Outgoing
+        && left.SenderUserId == right.SenderUserId
         && left.ForwardedFrom == right.ForwardedFrom
         && Formatting.SameDay(left.CreatedAtUnixMilliseconds, right.CreatedAtUnixMilliseconds)
         && Math.Abs(right.CreatedAtUnixMilliseconds - left.CreatedAtUnixMilliseconds) < 600_000;
@@ -549,7 +559,7 @@ public sealed partial class MainWindow : Window
     private void MessagesList_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
         if (args.ItemContainer is null) return;
-        bool separator = args.Item is DaySeparator;
+        bool separator = args.Item is DaySeparator or MessageModel { Service: true };
         args.ItemContainer.IsHitTestVisible = !separator;
         args.ItemContainer.IsEnabled = !separator;
         args.ItemContainer.ContextRequested -= Message_ContextRequested;
@@ -582,14 +592,17 @@ public sealed partial class MainWindow : Window
             _ => null,
         };
         if (message is null) return;
-        if (_messageSelectionMode)
+        if (_messageSelectionMode || message.Service)
         {
             args.Handled = true;
             return;
         }
+        // Из группы, где писать нельзя, остаются только чтение, копирование и свои удаления.
+        bool canWrite = _snapshot?.SelectedChat?.CanWrite != false;
+        bool moderator = _snapshot?.Group?.CanDeleteMessages == true;
         var menu = new MenuFlyout();
         menu.MenuFlyoutPresenterStyle = (Style)Application.Current.Resources["TgMessageMenuPresenter"];
-        if (!message.Deleted)
+        if (!message.Deleted && canWrite)
         {
             menu.Items.Add(MessageMenuItem("Ответить", "", () =>
             {
@@ -599,7 +612,7 @@ public sealed partial class MainWindow : Window
                 ComposerInput.Focus(FocusState.Programmatic);
             }));
         }
-        if (message is { Outgoing: true, Deleted: false })
+        if (message is { Outgoing: true, Deleted: false } && canWrite)
         {
             menu.Items.Add(MessageMenuItem("Изменить", "", () => BeginEdit(message)));
         }
@@ -618,6 +631,14 @@ public sealed partial class MainWindow : Window
         {
             menu.Items.Add(MessageMenuItem("Удалить", "", async () =>
                 await ExecuteAsync(new { command = "delete_messages", event_ids = new[] { message.EventId } })));
+        }
+        else if (message is { Outgoing: false, Deleted: false } && moderator)
+        {
+            menu.Items.Add(MessageMenuItem("Удалить у всех", "", async () =>
+            {
+                if (await ConfirmAsync("Удалить сообщение?", "Сообщение участника исчезнет у всех в группе."))
+                    await ExecuteAsync(new { command = "delete_messages", event_ids = new[] { message.EventId } });
+            }));
         }
         menu.Items.Add(MessageMenuItem("Выделить", "", () => EnterMessageSelectionMode(message)));
         ShowMenu(menu, sender, args);
@@ -710,7 +731,9 @@ public sealed partial class MainWindow : Window
         else if (_replyToEventId is not null)
         {
             message = _snapshot?.Messages.FirstOrDefault(value => value.EventId == _replyToEventId);
-            BannerTitle.Text = message?.Outgoing == true ? "Вы" : _snapshot?.SelectedChat?.DisplayName ?? "Ответ";
+            BannerTitle.Text = message?.Outgoing == true
+                ? "Вы"
+                : message?.SenderName ?? _snapshot?.SelectedChat?.DisplayName ?? "Ответ";
             BannerIcon.Symbol = Symbol.MailReply;
         }
         BannerText.Text = message?.Quote ?? string.Empty;
@@ -796,7 +819,11 @@ public sealed partial class MainWindow : Window
 
     private async void DeleteSelected_Click(object sender, RoutedEventArgs e)
     {
-        string[] ids = [.. SelectedMessages().Where(value => value.Outgoing).Select(value => value.EventId)];
+        // Модератор группы удаляет и чужие сообщения; права младших по роли ядро отсеет само.
+        bool moderator = _snapshot?.Group?.CanDeleteMessages == true;
+        string[] ids = [.. SelectedMessages()
+            .Where(value => !value.Service && (value.Outgoing || moderator))
+            .Select(value => value.EventId)];
         MessagesList.SelectedItems.Clear();
         if (ids.Length > 0) await ExecuteAsync(new { command = "delete_messages", event_ids = ids });
     }
@@ -813,7 +840,7 @@ public sealed partial class MainWindow : Window
         if (eventIds.Length == 0 || _snapshot is null) return;
         _forwardEventIds = eventIds;
         _forwardTargets.Clear();
-        foreach (ChatModel chat in _snapshot.Chats.Where(value => !value.PendingApproval)) _forwardTargets.Add(chat);
+        foreach (ChatModel chat in _snapshot.Chats.Where(value => value.CanWrite)) _forwardTargets.Add(chat);
         ForwardList.SelectedItem = null;
         await ForwardDialog.ShowAsync();
     }
@@ -836,7 +863,7 @@ public sealed partial class MainWindow : Window
     {
         if (_snapshot?.SelectedChat is not ChatModel chat) return;
         var menu = new MenuFlyout();
-        menu.Items.Add(MenuItem("Профиль", "", ShowProfile));
+        menu.Items.Add(MenuItem(chat.IsGroup ? "Информация о группе" : "Профиль", "", ShowProfile));
         menu.Items.Add(MenuItem(chat.MuteMenuLabel, "", async () =>
             await ExecuteAsync(new { command = "set_chat_muted", user_id = chat.UserId, muted = !chat.Muted })));
         menu.Items.Add(MenuItem(chat.PinMenuLabel, "", async () =>
@@ -847,11 +874,7 @@ public sealed partial class MainWindow : Window
             if (await ConfirmAsync("Очистить историю?", "Локальные сообщения этого диалога будут удалены."))
                 await ExecuteAsync(new { command = "clear_history", user_id = chat.UserId });
         }));
-        menu.Items.Add(MenuItem("Удалить чат", "", async () =>
-        {
-            if (await ConfirmAsync("Удалить диалог?", "Локальная история этого диалога будет удалена."))
-                await ExecuteAsync(new { command = "delete_contact", user_id = chat.UserId });
-        }));
+        AddDeleteChatItems(menu, chat);
         menu.ShowAt((FrameworkElement)sender);
     }
 
@@ -871,7 +894,12 @@ public sealed partial class MainWindow : Window
 
     private void ShowProfile()
     {
-        if (_snapshot?.SelectedChat is null) return;
+        if (_snapshot?.SelectedChat is not ChatModel chat) return;
+        if (chat.IsGroup)
+        {
+            ShowGroupPage();
+            return;
+        }
         FillProfile();
         ProfilePage.Visibility = Visibility.Visible;
     }
@@ -909,8 +937,9 @@ public sealed partial class MainWindow : Window
     private async void DeleteChat_Click(object sender, RoutedEventArgs e)
     {
         if (_snapshot?.SelectedContactId is not string id) return;
-        if (!await ConfirmAsync("Удалить диалог?", "Локальная история этого диалога будет удалена.")) return;
+        if (_snapshot?.SelectedChat is not ChatModel chat || !await ConfirmDeleteChatAsync(chat)) return;
         ProfilePage.Visibility = Visibility.Collapsed;
+        GroupPage.Visibility = Visibility.Collapsed;
         await ExecuteAsync(new { command = "delete_contact", user_id = id });
     }
 
@@ -1018,14 +1047,17 @@ public sealed partial class MainWindow : Window
         await SaveProfileAsync(encoded);
     }
 
-    /// <summary>Аватар уменьшается до 256 px и кодируется в JPEG: запись профиля должна быть компактной.</summary>
-    private static async Task<string?> EncodeAvatarAsync(StorageFile file)
+    /// <summary>
+    /// Аватар уменьшается и кодируется в JPEG: запись профиля должна быть компактной, а фото
+    /// группы ещё и помещаться в публичный ящик участника вместе с остальным состоянием.
+    /// </summary>
+    private static async Task<string?> EncodeAvatarAsync(StorageFile file, int maxEdge = 256, double? quality = null)
     {
         try
         {
             using IRandomAccessStream input = await file.OpenAsync(FileAccessMode.Read);
             BitmapDecoder decoder = await BitmapDecoder.CreateAsync(input);
-            double scale = Math.Min(1d, 256d / Math.Max(decoder.PixelWidth, decoder.PixelHeight));
+            double scale = Math.Min(1d, (double)maxEdge / Math.Max(decoder.PixelWidth, decoder.PixelHeight));
             uint width = (uint)Math.Max(1, decoder.PixelWidth * scale);
             uint height = (uint)Math.Max(1, decoder.PixelHeight * scale);
             PixelDataProvider pixels = await decoder.GetPixelDataAsync(
@@ -1036,7 +1068,12 @@ public sealed partial class MainWindow : Window
                 ColorManagementMode.DoNotColorManage);
 
             using var output = new InMemoryRandomAccessStream();
-            BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, output);
+            BitmapEncoder encoder = quality is double value
+                ? await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, output, new BitmapPropertySet
+                {
+                    ["ImageQuality"] = new BitmapTypedValue(value, global::Windows.Foundation.PropertyType.Single),
+                })
+                : await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, output);
             encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore, width, height, 96, 96,
                 pixels.DetachPixelData());
             await encoder.FlushAsync();

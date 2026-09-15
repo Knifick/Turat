@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import app.turattext.mobile.R
 import app.turattext.mobile.model.AppSnapshot
 import app.turattext.mobile.model.Chat
+import app.turattext.mobile.model.CoreJson
 import app.turattext.mobile.model.SearchHit
 import app.turattext.mobile.update.UpdateState
 import kotlinx.coroutines.delay
@@ -234,6 +235,7 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
     val colors = Telegram.colors
     val contact = chat.contact
     var menu by remember { mutableStateOf(false) }
+    var confirmGroupDelete by remember { mutableStateOf(false) }
     Box(Modifier.padding(horizontal = 8.dp, vertical = 2.dp)) {
         Row(
             Modifier.fillMaxWidth()
@@ -255,6 +257,10 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                        if (chat.isGroup) {
+                            Icon(painterResource(R.drawable.ic_group), "Группа", Modifier.size(17.dp), colors.text)
+                            Spacer(Modifier.width(4.dp))
+                        }
                         Text(
                             contact.displayName,
                             Modifier.weight(1f, fill = false),
@@ -303,8 +309,10 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
                     Text(
                         when {
                             contact.draft.isNotBlank() -> contact.draft
+                            contact.pending && chat.isGroup -> "Приглашение в группу"
                             contact.pending -> "Хочет начать диалог"
                             chat.preview.isNotBlank() -> chat.preview
+                            chat.isGroup -> membersLabel(chat.memberCount)
                             contact.username != null -> "@${contact.username}"
                             else -> shortId(contact.userId)
                         },
@@ -348,10 +356,22 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
                 menu = false
                 actions.clearHistory(contact.userId)
             }
-            ChatMenuItem(R.drawable.ic_delete, "Удалить чат", danger = true) {
-                menu = false
-                actions.deleteContact(contact.userId)
+            if (chat.isGroup && chat.canWrite) {
+                ChatMenuItem(R.drawable.ic_close, "Покинуть группу", danger = true) {
+                    menu = false
+                    actions.command(CoreJson.command("leave_group", "group_id" to contact.userId), null)
+                }
             }
+            ChatMenuItem(R.drawable.ic_delete, if (chat.isGroup) "Удалить группу" else "Удалить чат", danger = true) {
+                menu = false
+                // Удаление группы — это ещё и выход из неё, поэтому оно требует подтверждения.
+                if (chat.isGroup) confirmGroupDelete = true else actions.deleteContact(contact.userId)
+            }
+        }
+    }
+    if (confirmGroupDelete) {
+        GroupDeleteDialog(chat, onDismiss = { confirmGroupDelete = false }) {
+            actions.deleteContact(contact.userId)
         }
     }
 }

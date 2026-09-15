@@ -29,8 +29,14 @@
 
                     <Grid Grid.Column="1" RowDefinitions="Auto,Auto" VerticalAlignment="Center">
                         <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="4">
-                            <TextBlock Text="{x:Bind DisplayName}" Foreground="{ThemeResource TgText}"
-                                       FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="5">
+                                <Viewbox Width="15" Height="15" VerticalAlignment="Center"
+                                         Visibility="{x:Bind GroupVisibility}">
+                                    <SymbolIcon Symbol="People" Foreground="{ThemeResource TgText}" />
+                                </Viewbox>
+                                <TextBlock Grid.Column="1" Text="{x:Bind DisplayName}" Foreground="{ThemeResource TgText}"
+                                           FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            </Grid>
                             <Viewbox Grid.Column="1" Width="14" Height="14" VerticalAlignment="Center"
                                      Visibility="{x:Bind MutedVisibility}">
                                 <Path Data="M12 3 A5 5 0 0 0 7 8 v4 l-1.5 2.5 h13 L17 12 V8 A5 5 0 0 0 12 3 Z M4 4 L20 20"
@@ -125,6 +131,9 @@
                             CornerRadius="{x:Bind BubbleCorners}" Background="{ThemeResource TgBubbleIn}"
                             BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                         <StackPanel>
+                            <TextBlock Text="{x:Bind SenderLabel}" Visibility="{x:Bind SenderVisibility}"
+                                       Foreground="{x:Bind SenderBrush}" FontSize="13" FontWeight="SemiBold"
+                                       TextTrimming="CharacterEllipsis" Margin="0,0,0,2" />
                             <TextBlock Text="{x:Bind ForwardLabel}" Visibility="{x:Bind ForwardVisibility}"
                                        Foreground="{ThemeResource TgAccent}" FontSize="12" FontWeight="SemiBold"
                                        Margin="0,0,0,3" />
@@ -348,11 +357,69 @@
                 </Grid>
             </DataTemplate>
 
+            <!-- Служебная отметка группы: кто кого добавил, исключил, назначил. -->
+            <DataTemplate x:Key="ServiceMessageTemplate" x:DataType="local:MessageModel">
+                <Border HorizontalAlignment="Center" CornerRadius="14" Padding="12,5" MaxWidth="460"
+                        Background="{ThemeResource TgServicePill}" Margin="0,8,0,2"
+                        BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
+                    <TextBlock Text="{x:Bind Text}" Foreground="{ThemeResource TgServiceText}" FontSize="12"
+                               FontWeight="SemiBold" TextWrapping="Wrap" TextAlignment="Center" />
+                </Border>
+            </DataTemplate>
+
+            <!-- Контакт в диалогах выбора участников группы. -->
+            <DataTemplate x:Key="ContactPickTemplate" x:DataType="local:ChatModel">
+                <Grid Padding="4,6" ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                    <Border Width="40" Height="40" CornerRadius="20" Background="{x:Bind AvatarBrush}">
+                        <Grid>
+                            <TextBlock Text="{x:Bind Initials}" FontSize="15" FontWeight="SemiBold" Foreground="White"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            <Image Source="{x:Bind local:Images.Decode(AvatarBase64)}" Stretch="UniformToFill" />
+                        </Grid>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind DisplayName}" Foreground="{ThemeResource TgText}" FontSize="14"
+                                   FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{x:Bind Presence}" Foreground="{ThemeResource TgHint}" FontSize="12" />
+                    </StackPanel>
+                </Grid>
+            </DataTemplate>
+
+            <!-- Участник на странице группы: роль и действия, доступные текущему пользователю. -->
+            <DataTemplate x:Key="GroupMemberTemplate" x:DataType="local:GroupMemberModel">
+                <Grid Padding="6,7" ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="12" Background="Transparent"
+                      CornerRadius="12" ContextRequested="GroupMember_ContextRequested">
+                    <Border Width="42" Height="42" CornerRadius="21" Background="{x:Bind AvatarBrush}">
+                        <Grid>
+                            <TextBlock Text="{x:Bind Initials}" FontSize="15" FontWeight="SemiBold" Foreground="White"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            <Image Source="{x:Bind local:Images.Decode(AvatarBase64)}" Stretch="UniformToFill" />
+                        </Grid>
+                    </Border>
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind DisplayName}" Foreground="{ThemeResource TgText}" FontSize="14"
+                                   FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{x:Bind Subtitle}" Foreground="{ThemeResource TgHint}" FontSize="12"
+                                   TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <Border Grid.Column="2" CornerRadius="10" Padding="8,2" VerticalAlignment="Center"
+                            Background="{ThemeResource TgAccentSoft}" Visibility="{x:Bind RoleVisibility}">
+                        <TextBlock Text="{x:Bind RoleLabel}" Foreground="{ThemeResource TgText}" FontSize="11"
+                                   FontWeight="SemiBold" />
+                    </Border>
+                    <Button Grid.Column="3" Style="{StaticResource TgIconButton}" Click="GroupMemberMenu_Click"
+                            Visibility="{x:Bind MenuVisibility}" ToolTipService.ToolTip="Действия">
+                        <SymbolIcon Symbol="More" />
+                    </Button>
+                </Grid>
+            </DataTemplate>
+
             <local:MessageTemplateSelector x:Key="MessageTemplateSelector"
                                            Day="{StaticResource DaySeparatorTemplate}"
                                            Incoming="{StaticResource IncomingMessageTemplate}"
                                            Outgoing="{StaticResource OutgoingMessageTemplate}"
-                                           Transfer="{StaticResource TransferTemplate}" />
+                                           Transfer="{StaticResource TransferTemplate}"
+                                           Service="{StaticResource ServiceMessageTemplate}" />
         </Grid.Resources>
 
         <Grid.RowDefinitions>
@@ -470,8 +537,8 @@
                                HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
 
                     <Button Style="{StaticResource TgAccentCircle}" HorizontalAlignment="Right"
-                            VerticalAlignment="Bottom" Margin="0,0,18,18" Click="NewContact_Click"
-                            ToolTipService.ToolTip="Новый диалог">
+                            VerticalAlignment="Bottom" Margin="0,0,18,18" Click="NewChat_Click"
+                            ToolTipService.ToolTip="Новый диалог или группа">
                         <SymbolIcon Symbol="Edit" />
                     </Button>
                 </Grid>
@@ -633,13 +700,25 @@
                       Margin="10,0,10,10" CornerRadius="24"
                       BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
                       ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8" Visibility="Collapsed">
-                    <TextBlock Text="Этот пользователь хочет начать переписку" VerticalAlignment="Center"
+                    <TextBlock x:Name="PendingBarText" Text="Этот пользователь хочет начать переписку"
+                               VerticalAlignment="Center" TextWrapping="Wrap"
                                Foreground="{ThemeResource TgHint}" FontSize="13" />
                     <Button Grid.Column="1" Content="Отклонить" Click="RejectContact_Click"
                             Background="Transparent" BorderThickness="0" Foreground="{ThemeResource TgDanger}" />
                     <Button Grid.Column="2" Content="Принять" Click="AcceptContact_Click"
                             Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
                             BorderThickness="0" />
+                </Grid>
+
+                <!-- Из группы вышли или исключили: история остаётся, писать нельзя. -->
+                <Grid x:Name="GroupLeftBar" Grid.Row="5" Background="{ThemeResource TgPanel}" Padding="12"
+                      Margin="10,0,10,10" CornerRadius="24"
+                      BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
+                      ColumnDefinitions="*,Auto" ColumnSpacing="8" Visibility="Collapsed">
+                    <TextBlock Text="Вы больше не участник этой группы" VerticalAlignment="Center"
+                               Foreground="{ThemeResource TgHint}" FontSize="13" />
+                    <Button Grid.Column="1" Content="Удалить чат" Click="DeleteChat_Click"
+                            Background="Transparent" BorderThickness="0" Foreground="{ThemeResource TgDanger}" />
                 </Grid>
             </Grid>
         </Grid>
@@ -893,6 +972,97 @@
             </ScrollViewer>
         </Grid>
 
+        <!-- Страница группы: данные, права участников, состав и роли. -->
+        <Grid x:Name="GroupPage" Grid.Row="1" Background="{ThemeResource TgOverlay}" Visibility="Collapsed"
+              RowDefinitions="Auto,*">
+            <Grid Height="56" Padding="10,0" Background="{ThemeResource TgPanel}" ColumnDefinitions="Auto,*"
+                  ColumnSpacing="8">
+                <Button Style="{StaticResource TgIconButton}" Click="CloseGroupPage_Click">
+                    <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE72B;" FontSize="15" />
+                </Button>
+                <TextBlock Grid.Column="1" Text="Группа" FontSize="17" FontWeight="SemiBold"
+                           VerticalAlignment="Center" Foreground="{ThemeResource TgText}" />
+            </Grid>
+            <ScrollViewer Grid.Row="1">
+                <StackPanel MaxWidth="600" HorizontalAlignment="Stretch" Padding="20,20,20,32" Spacing="8">
+                    <Button x:Name="GroupAvatarButton" Style="{StaticResource TgIconButton}" Padding="0"
+                            HorizontalAlignment="Center" Click="PickGroupAvatar_Click"
+                            ToolTipService.ToolTip="Сменить фото группы">
+                        <Grid Width="96" Height="96">
+                            <Border CornerRadius="48" Background="{ThemeResource TgAccent}">
+                                <Grid>
+                                    <TextBlock x:Name="GroupInitial" FontSize="30" FontWeight="SemiBold"
+                                               Foreground="{ThemeResource TgOnAccent}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    <Image x:Name="GroupAvatar" Stretch="UniformToFill" />
+                                </Grid>
+                            </Border>
+                            <Border x:Name="GroupAvatarBadge" Width="28" Height="28" CornerRadius="14"
+                                    Background="{ThemeResource TgAccent}"
+                                    HorizontalAlignment="Right" VerticalAlignment="Bottom">
+                                <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE722;" FontSize="12"
+                                          Foreground="{ThemeResource TgOnAccent}" />
+                            </Border>
+                        </Grid>
+                    </Button>
+                    <TextBlock x:Name="GroupTitle" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center"
+                               TextWrapping="Wrap" TextAlignment="Center" Foreground="{ThemeResource TgText}" />
+                    <TextBlock x:Name="GroupSubtitle" Foreground="{ThemeResource TgHint}" HorizontalAlignment="Center"
+                               FontSize="13" />
+                    <TextBlock x:Name="GroupAboutText" Foreground="{ThemeResource TgText}" HorizontalAlignment="Center"
+                               TextAlignment="Center" TextWrapping="Wrap" FontSize="13" />
+
+                    <StackPanel x:Name="GroupEditPanel" Spacing="6">
+                        <TextBlock Text="Данные группы" Style="{StaticResource TgSectionTitle}" />
+                        <TextBox x:Name="GroupNameInput" Header="Название" MaxLength="64" />
+                        <TextBox x:Name="GroupAboutInput" Header="Описание" AcceptsReturn="True" TextWrapping="Wrap"
+                                 MaxLength="255" />
+                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                            <Button Content="Сохранить" Click="SaveGroupInfo_Click"
+                                    Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
+                                    BorderThickness="0" />
+                            <Button x:Name="RemoveGroupAvatarButton" Content="Убрать фото"
+                                    Click="RemoveGroupAvatar_Click" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <StackPanel x:Name="GroupPermissionsPanel" Spacing="2">
+                        <TextBlock Text="Права участников" Style="{StaticResource TgSectionTitle}" />
+                        <ToggleSwitch x:Name="MembersCanInviteToggle" Header="Приглашать новых участников"
+                                      OnContent="Могут все участники" OffContent="Только администраторы"
+                                      Toggled="GroupPermissions_Toggled" />
+                        <ToggleSwitch x:Name="MembersCanEditToggle" Header="Менять название, описание и фото"
+                                      OnContent="Могут все участники" OffContent="Только администраторы"
+                                      Toggled="GroupPermissions_Toggled" />
+                    </StackPanel>
+
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock x:Name="GroupMembersTitle" Style="{StaticResource TgSectionTitle}" />
+                        <Button x:Name="AddGroupMembersButton" Grid.Column="1" Click="AddGroupMembers_Click"
+                                VerticalAlignment="Bottom">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <SymbolIcon Symbol="AddFriend" />
+                                <TextBlock Text="Добавить" />
+                            </StackPanel>
+                        </Button>
+                    </Grid>
+                    <ItemsControl x:Name="GroupMembersList" ItemTemplate="{StaticResource GroupMemberTemplate}" />
+
+                    <TextBlock Text="Безопасность" Style="{StaticResource TgSectionTitle}" />
+                    <TextBlock Foreground="{ThemeResource TgHint}" FontSize="12" TextWrapping="Wrap"
+                               Text="Сообщения группы шифруются отдельно для каждого участника его личным сквозным каналом. Исключённый участник не получит ни одного нового сообщения. Права на каждое изменение состава проверяет устройство каждого участника. «Ещё не подтвердил(а) участие» — от человека не пришло ни одного подписанного события группы: пока это лишь слова пригласившего." />
+                    <TextBlock x:Name="GroupIdText" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TgHint}" IsTextSelectionEnabled="True" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,10,0,0">
+                        <Button x:Name="LeaveGroupButton" Content="Покинуть группу" Click="LeaveGroup_Click"
+                                Foreground="{ThemeResource TgDanger}" />
+                        <Button Content="Удалить группу" Click="DeleteChat_Click"
+                                Foreground="{ThemeResource TgDanger}" />
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
         <ProgressBar x:Name="BusyIndicator" Grid.Row="1" Height="2" VerticalAlignment="Top" IsIndeterminate="True"
                      Visibility="Collapsed" Foreground="{ThemeResource TgAccent}" />
 
@@ -904,6 +1074,35 @@
                 <TextBox x:Name="NewContactInput" PlaceholderText="@username или UserID" />
                 <TextBlock x:Name="NewContactError" TextWrapping="Wrap"
                            Foreground="{ThemeResource TgDanger}" Visibility="Collapsed" />
+            </StackPanel>
+        </ContentDialog>
+
+        <ContentDialog x:Name="NewGroupDialog" Title="Новая группа" PrimaryButtonText="Создать группу"
+                       CloseButtonText="Отмена" DefaultButton="Primary"
+                       PrimaryButtonClick="NewGroupDialog_PrimaryButtonClick">
+            <StackPanel Spacing="10" MinWidth="380">
+                <TextBox x:Name="NewGroupName" Header="Название группы" MaxLength="64" />
+                <TextBlock Text="Участники — ваши принятые контакты. Отметьте, кого пригласить: каждый сам решит, вступать ли."
+                           TextWrapping="Wrap" Foreground="{ThemeResource TgHint}" FontSize="12" />
+                <ListView x:Name="NewGroupContacts" Height="300" SelectionMode="Multiple"
+                          ItemTemplate="{StaticResource ContactPickTemplate}" />
+                <TextBlock x:Name="NewGroupEmpty" Text="Сначала начните диалог хотя бы с одним собеседником."
+                           Foreground="{ThemeResource TgHint}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="NewGroupError" TextWrapping="Wrap" Foreground="{ThemeResource TgDanger}"
+                           Visibility="Collapsed" />
+            </StackPanel>
+        </ContentDialog>
+
+        <ContentDialog x:Name="AddMembersDialog" Title="Добавить участников" PrimaryButtonText="Добавить"
+                       CloseButtonText="Отмена" DefaultButton="Primary"
+                       PrimaryButtonClick="AddMembersDialog_PrimaryButtonClick">
+            <StackPanel Spacing="10" MinWidth="380">
+                <ListView x:Name="AddMembersContacts" Height="320" SelectionMode="Multiple"
+                          ItemTemplate="{StaticResource ContactPickTemplate}" />
+                <TextBlock x:Name="AddMembersEmpty" Text="Все ваши контакты уже в этой группе."
+                           Foreground="{ThemeResource TgHint}" TextWrapping="Wrap" Visibility="Collapsed" />
+                <TextBlock x:Name="AddMembersError" TextWrapping="Wrap" Foreground="{ThemeResource TgDanger}"
+                           Visibility="Collapsed" />
             </StackPanel>
         </ContentDialog>
 

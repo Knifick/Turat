@@ -50,17 +50,26 @@ public sealed record ChatModel(
     bool LastMessageOutgoing,
     bool LastMessageDelivered,
     bool LastMessageRead,
-    int UnreadCount)
+    int UnreadCount,
+    bool IsGroup = false,
+    int MemberCount = 0,
+    string? GroupRole = null,
+    bool GroupLeft = false)
 {
     [JsonIgnore] public string Initials => Formatting.Initials(DisplayName);
     [JsonIgnore] public Brush AvatarBrush => AvatarPalette.For(UserId);
     [JsonIgnore] public string TimeLabel => Formatting.ChatListTime(LastActivityUnixMilliseconds);
+    [JsonIgnore] public Visibility GroupVisibility => IsGroup ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Писать можно: диалог принят, а из группы пользователь не вышел.</summary>
+    [JsonIgnore] public bool CanWrite => !PendingApproval && !GroupLeft;
 
     [JsonIgnore]
     public string PreviewText => Draft.Length > 0
         ? Draft
-        : PendingApproval ? "Хочет начать диалог"
+        : PendingApproval ? (IsGroup ? "Приглашение в группу" : "Хочет начать диалог")
         : Preview.Length > 0 ? Preview
+        : IsGroup ? Formatting.Members(MemberCount)
         : Username is null ? Formatting.ShortId(UserId) : "@" + Username;
 
     [JsonIgnore] public Visibility DraftVisibility => Draft.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -77,7 +86,7 @@ public sealed record ChatModel(
     public Brush UnreadBadgeBrush =>
         (Brush)Application.Current.Resources[Muted ? "TgBadgeMuted" : "TgBadge"];
     [JsonIgnore] public Visibility VerifiedVisibility => FingerprintVerified ? Visibility.Visible : Visibility.Collapsed;
-    [JsonIgnore] public Visibility OnlineVisibility => Formatting.IsOnline(LastSeenUnixMilliseconds) ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility OnlineVisibility => !IsGroup && Formatting.IsOnline(LastSeenUnixMilliseconds) ? Visibility.Visible : Visibility.Collapsed;
 
     [JsonIgnore]
     public Visibility SingleTickVisibility =>
@@ -87,7 +96,12 @@ public sealed record ChatModel(
     public Visibility DoubleTickVisibility =>
         HasLastMessage && LastMessageOutgoing && LastMessageDelivered ? Visibility.Visible : Visibility.Collapsed;
 
-    [JsonIgnore] public string Presence => Formatting.Presence(PendingApproval, LastSeenUnixMilliseconds);
+    [JsonIgnore]
+    public string Presence => !IsGroup
+        ? Formatting.Presence(PendingApproval, LastSeenUnixMilliseconds)
+        : GroupLeft ? "вы не участник группы"
+        : PendingApproval ? "приглашение в группу"
+        : Formatting.Members(MemberCount);
     [JsonIgnore] public string SecurityBadge => FingerprintVerified ? "Fingerprint сверен" : "Fingerprint не сверен";
 }
 
@@ -157,9 +171,20 @@ public sealed record MessageModel(
     bool Pinned,
     AttachmentModel? Attachment,
     string? ReplyToEventId,
-    string? ForwardedFrom) : INotifyPropertyChanged
+    string? ForwardedFrom,
+    bool Service = false,
+    string? SenderName = null) : INotifyPropertyChanged
 {
     private ImageSource? _preview;
+
+    /// <summary>Имя автора над первым пузырём подряд в группе; заполняется окном.</summary>
+    [JsonIgnore] public bool ShowSender { get; set; }
+
+    [JsonIgnore] public string SenderLabel => SenderName ?? string.Empty;
+    [JsonIgnore] public Visibility SenderVisibility => ShowSender && SenderName is not null ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Цвет имени совпадает с цветом аватарки автора — так авторов легко различать.</summary>
+    [JsonIgnore] public Brush SenderBrush => AvatarPalette.For(SenderUserId);
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -333,10 +358,77 @@ public sealed record AppSnapshot(
     string StatusMessage,
     bool OnboardingRequired,
     string SearchQuery,
-    IReadOnlyList<SearchHitModel> SearchResults)
+    IReadOnlyList<SearchHitModel> SearchResults,
+    GroupViewModel? Group = null)
 {
     [JsonIgnore] public ChatModel? SelectedChat => Chats.FirstOrDefault(value => value.UserId == SelectedContactId);
 }
+
+public sealed record GroupPermissionsModel(bool MembersCanInvite, bool MembersCanEditInfo);
+
+/// <summary>Участник в карточке группы. Имя уже разрешено ядром через контакты.</summary>
+public sealed record GroupMemberModel(
+    string UserId,
+    string DisplayName,
+    string? AvatarBase64,
+    string Role,
+    bool IsSelf,
+    bool IsContact,
+    bool Confirmed,
+    string AddedByName)
+{
+    [JsonIgnore] public string Initials => Formatting.Initials(DisplayName);
+    [JsonIgnore] public Brush AvatarBrush => AvatarPalette.For(UserId);
+
+    [JsonIgnore]
+    public string RoleLabel => Role switch
+    {
+        "owner" => "владелец",
+        "admin" => "админ",
+        _ => string.Empty,
+    };
+
+    [JsonIgnore] public Visibility RoleVisibility => RoleLabel.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore]
+    public string Subtitle => IsSelf ? "это вы"
+        : !Confirmed ? "ещё не подтвердил(а) участие"
+        : IsContact ? "в ваших контактах"
+        : "добавил(а) " + AddedByName;
+
+    /// <summary>Кнопка действий видна, только если текущему пользователю есть что предложить.</summary>
+    [JsonIgnore] public Visibility MenuVisibility { get; set; } = Visibility.Collapsed;
+
+    public static int Rank(string? role) => role switch
+    {
+        "owner" => 2,
+        "admin" => 1,
+        "member" => 0,
+        _ => -1,
+    };
+}
+
+/// <summary>Карточка открытой группы и права текущего пользователя в ней — их считает ядро.</summary>
+public sealed record GroupViewModel(
+    string GroupId,
+    string Name,
+    string About,
+    string? AvatarBase64,
+    long Epoch,
+    string CreatedBy,
+    long CreatedAtUnixMilliseconds,
+    string? MyRole,
+    bool PendingInvite,
+    string? InvitedByName,
+    bool Left,
+    GroupPermissionsModel Permissions,
+    IReadOnlyList<GroupMemberModel> Members,
+    bool CanSend,
+    bool CanInvite,
+    bool CanEditInfo,
+    bool CanRemoveMembers,
+    bool CanManageAdmins,
+    bool CanDeleteMessages);
 
 /// <summary>Найденное сообщение в глобальном поиске.</summary>
 public sealed record SearchHitModel(
@@ -454,6 +546,18 @@ internal static class Formatting
     }
 
     public static bool SameDay(long left, long right) => Local(left).Date == Local(right).Date;
+
+    /// <summary>«1 участник», «3 участника», «11 участников».</summary>
+    public static string Members(int count)
+    {
+        int tens = count % 100;
+        int units = count % 10;
+        string word = tens is >= 11 and <= 14 ? "участников"
+            : units == 1 ? "участник"
+            : units is >= 2 and <= 4 ? "участника"
+            : "участников";
+        return $"{count} {word}";
+    }
 
     public static bool IsOnline(long? lastSeen) =>
         lastSeen is long value && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - value < 90_000;

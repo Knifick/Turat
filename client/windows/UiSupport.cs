@@ -52,10 +52,14 @@ public sealed partial class MessageTemplateSelector : DataTemplateSelector
     /// <summary>Вложение, которое ещё шифруется перед отправкой.</summary>
     public DataTemplate? Transfer { get; set; }
 
+    /// <summary>Служебная отметка группы: «Алиса добавила Боба».</summary>
+    public DataTemplate? Service { get; set; }
+
     protected override DataTemplate? SelectTemplateCore(object item) => item switch
     {
         DaySeparator => Day,
         TransferModel => Transfer,
+        MessageModel { Service: true } => Service,
         MessageModel { Outgoing: true } => Outgoing,
         MessageModel => Incoming,
         _ => null,

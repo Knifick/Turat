@@ -8,14 +8,14 @@ use std::sync::{Arc, atomic::Ordering};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
-use super::{AppCore, short_id};
+use super::{ALLOWED_REACTIONS, AppCore, groups, set_reaction_mark, short_id};
 use crate::{
     CoreError,
     blobs::{self, AttachmentManifest},
     identity::conversation_id,
     mailbox::{self, MailboxEnvelope, MailboxGrant, OwnedMailbox},
     media::Progress,
-    models::{Attachment, Contact, Message},
+    models::{Attachment, Contact, GroupState, Message},
     network::NodeDescriptor,
     prekeys::{DESIRED_ONE_TIME_PREKEYS, PrekeyState},
     protocol::{
@@ -23,6 +23,7 @@ use crate::{
         KIND_EDIT, KIND_REACTION, KIND_RECEIPT_DELIVERY, KIND_RECEIPT_READ, KIND_TEXT,
         PROTOCOL_VERSION, ReactionPayload, SignedDeliveryPackage, SignedProtocolEvent,
         TargetPayload, TextPayload, WIRE_RATCHET, WIRE_SESSION_INIT, WireIdentity, WireMessage,
+        is_group_id,
     },
     ratchet::{self, InitialSessionEnvelope, RatchetMessage},
     routing::{SignedDeviceList, SignedRoutingDescriptor},
@@ -33,6 +34,12 @@ use crate::{
 /// канал не должен превращаться в ретранслятор файлов и служебных событий.
 const MAX_CONTACT_REQUEST_BYTES: usize = 4 * 1024;
 const OUTBOX_BATCH: usize = 25;
+/// Сообщение в большую группу — это десятки задач сразу. Фоновая синхронизация разбирает
+/// очередь несколькими пачками, но не бесконечно: цикл не должен надолго держать ядро.
+const OUTBOX_SYNC_LIMIT: usize = 250;
+/// Задача группы, которую неделю не удаётся доставить (участник пропал из сети), уже
+/// никому не нужна: конверт с ней всё равно истёк бы на Node.
+const GROUP_JOB_TTL_MILLISECONDS: i64 = ENVELOPE_TTL_HOURS * 3_600_000;
 const INBOX_BATCH: u32 = 100;
 const ENVELOPE_TTL_HOURS: i64 = 7 * 24;
 /// Нечитаемый конверт старше суток выбрасываем: чинить его уже нечем, а квота ящика конечна.
@@ -173,10 +180,25 @@ impl AppCore {
         kind: &str,
         payload: &T,
     ) -> Result<(), CoreError> {
+        let conversation = conversation_id(&self.identity.public.user_id, user_id);
+        let event = self.sign_event(&conversation, event_id, kind, payload)?;
+        self.store.retry_now(user_id)?;
+        self.store.enqueue_outbox(user_id, &event)
+    }
+
+    /// Подпись события устройства. Диалог входит в подпись: событие одного чата нельзя
+    /// переложить в другой — ни в личный, ни в группу.
+    pub(super) fn sign_event<T: serde::Serialize>(
+        &self,
+        conversation: &str,
+        event_id: &str,
+        kind: &str,
+        payload: &T,
+    ) -> Result<SignedProtocolEvent, CoreError> {
         let unsigned = SignedProtocolEvent {
             version: PROTOCOL_VERSION,
             event_id: event_id.to_owned(),
-            conversation_id: conversation_id(&self.identity.public.user_id, user_id),
+            conversation_id: conversation.to_owned(),
             sender_user_id: self.identity.public.user_id.clone(),
             sender_device_id: self.identity.public.device_id.clone(),
             device_sequence: self.store.next_device_sequence()?,
@@ -186,32 +208,57 @@ impl AppCore {
             signature: String::new(),
         };
         let signature = self.identity.sign_device(&unsigned.canonical_bytes()?)?;
-        self.store.retry_now(user_id)?;
-        self.store.enqueue_outbox(
-            user_id,
-            &SignedProtocolEvent {
-                signature,
-                ..unsigned
-            },
-        )
+        Ok(SignedProtocolEvent {
+            signature,
+            ..unsigned
+        })
     }
 
     /// Разбирает очередь. Неудача одного адресата не мешает остальным: задача просто
     /// откладывается с нарастающей паузой.
     pub(super) fn flush_outbox(&mut self, node: &NodeDescriptor) -> Result<usize, CoreError> {
+        self.flush_outbox_limited(node, OUTBOX_SYNC_LIMIT)
+    }
+
+    pub(super) fn flush_outbox_limited(
+        &mut self,
+        node: &NodeDescriptor,
+        limit: usize,
+    ) -> Result<usize, CoreError> {
         self.drain_pending_uploads(node)?;
-        let jobs = self.store.due_outbox(OUTBOX_BATCH)?;
+        let now = chrono::Utc::now().timestamp_millis();
         let mut sent = 0;
-        for job in jobs {
-            match self.deliver(node, &job) {
-                Ok(()) => {
+        let mut handled = 0;
+        while handled < limit {
+            let jobs = self.store.due_outbox(OUTBOX_BATCH.min(limit - handled))?;
+            let batch = jobs.len();
+            for job in jobs {
+                handled += 1;
+                let group = is_group_id(&job.event.conversation_id);
+                if group && now - job.event.created_at_unix_milliseconds > GROUP_JOB_TTL_MILLISECONDS {
                     self.store.complete_outbox(&job.job_id)?;
-                    sent += 1;
+                    continue;
                 }
-                Err(error) => {
-                    self.status = format!("Не удалось отправить: {error}");
-                    self.store.defer_outbox(&job.job_id, job.attempts)?;
+                match self.deliver(node, &job) {
+                    Ok(()) => {
+                        self.store.complete_outbox(&job.job_id)?;
+                        // Квитанций о доставке группа не шлёт — это N² трафика. Первая
+                        // галочка значит «ушло хотя бы одному участнику».
+                        if group
+                            && matches!(job.event.kind.as_str(), KIND_TEXT | KIND_ATTACHMENT)
+                        {
+                            self.store.mark_delivered(&job.event.event_id)?;
+                        }
+                        sent += 1;
+                    }
+                    Err(error) => {
+                        self.status = format!("Не удалось отправить: {error}");
+                        self.store.defer_outbox(&job.job_id, job.attempts)?;
+                    }
                 }
+            }
+            if batch < OUTBOX_BATCH {
+                break;
             }
         }
         Ok(sent)
@@ -237,7 +284,9 @@ impl AppCore {
             };
             self.store
                 .save_event_manifest(&pending.event_id, &manifest)?;
-            self.queue_event(
+            // Пока файл выгружался, из группы могли и выйти: сообщение остаётся в истории,
+            // но разослать его уже некому. Остальную очередь это не останавливает.
+            if let Err(error) = self.queue_for_chat(
                 &pending.user_id,
                 &pending.event_id,
                 KIND_ATTACHMENT,
@@ -248,7 +297,9 @@ impl AppCore {
                     reply_to_event_id: pending.reply_to_event_id.clone(),
                     forwarded_from: pending.forwarded_from.clone(),
                 },
-            )?;
+            ) {
+                self.status = format!("Файл не отправлен: {error}");
+            }
             self.store.clear_pending_upload(&pending.event_id)?;
         }
         Ok(())
@@ -291,7 +342,12 @@ impl AppCore {
             if routes.is_empty() {
                 continue;
             }
-            if private.is_empty() && !is_contact_request(&job.event) {
+            // Участники группы не обязаны быть знакомы. Первое событие незнакомцу уходит
+            // в публичный ящик под его квотой и PoW; с ним же приходит наш личный адрес.
+            if private.is_empty()
+                && !is_contact_request(&job.event)
+                && !is_group_id(&job.event.conversation_id)
+            {
                 failure = Some(CoreError::InvalidInput(
                     "Собеседник ещё не ответил: пока можно отправить только короткое текстовое сообщение".to_owned(),
                 ));
@@ -485,8 +541,9 @@ impl AppCore {
         let event = &package.body.event;
         if event.event_id != wire.event_id
             || !event.verify(&wire.sender_identity)
-            || event.conversation_id
+            || (event.conversation_id
                 != conversation_id(&self.identity.public.user_id, &event.sender_user_id)
+                && !is_group_id(&event.conversation_id))
         {
             return Err(CoreError::Crypto(
                 "Событие не прошло проверку подписи".to_owned(),
@@ -530,6 +587,11 @@ impl AppCore {
             }
         }
 
+        // Событие группы не создаёт запрос на общение: у группы свои правила допуска.
+        if is_group_id(&event.conversation_id) {
+            return self.apply_group_event(event);
+        }
+
         let existing = self.store.contact(&event.sender_user_id)?;
         let accepted = existing.as_ref().is_some_and(|value| !value.pending_approval);
         if !accepted && event.kind != KIND_TEXT {
@@ -541,7 +603,42 @@ impl AppCore {
         }
 
         let conversation = conversation_id(&self.identity.public.user_id, &event.sender_user_id);
-        let applied = match event.kind.as_str() {
+        let applied = self.apply_message_event(event, &conversation, None)?;
+
+        // Квитанция о доставке уходит только по принятому диалогу: она подтверждает
+        // и получение, и то, что мы вообще держим этот канал открытым.
+        if accepted && matches!(event.kind.as_str(), KIND_TEXT | KIND_ATTACHMENT) {
+            self.queue_event(
+                &event.sender_user_id,
+                &format!("evt1-{}", super::random_hex(16)),
+                KIND_RECEIPT_DELIVERY,
+                &TargetPayload {
+                    version: PROTOCOL_VERSION,
+                    target_event_id: event.event_id.clone(),
+                },
+            )?;
+        }
+        Ok(applied)
+    }
+
+    /// Сообщение, правка, реакция или квитанция — общие для личного диалога и группы.
+    ///
+    /// Цель правки или реакции ищется только в том же диалоге: знание чужого `eventId`
+    /// не должно позволять трогать сообщения другого чата. В группе реакции учитываются
+    /// по авторам, а чужое сообщение может удалить старший по роли.
+    pub(super) fn apply_message_event(
+        &mut self,
+        event: &SignedProtocolEvent,
+        conversation: &str,
+        group: Option<&GroupState>,
+    ) -> Result<bool, CoreError> {
+        let find = |core: &Self, event_id: &str| -> Result<Option<Message>, CoreError> {
+            Ok(core
+                .store
+                .message(event_id)?
+                .filter(|message| message.conversation_id == conversation && !message.service))
+        };
+        Ok(match event.kind.as_str() {
             KIND_TEXT => {
                 let payload: TextPayload = event.decode_payload()?;
                 if payload.text.trim().is_empty() {
@@ -549,7 +646,7 @@ impl AppCore {
                 }
                 self.store.save_message(&Message {
                     event_id: event.event_id.clone(),
-                    conversation_id: conversation,
+                    conversation_id: conversation.to_owned(),
                     sender_user_id: event.sender_user_id.clone(),
                     text: payload.text,
                     created_at_unix_milliseconds: event.created_at_unix_milliseconds,
@@ -563,6 +660,9 @@ impl AppCore {
                     attachment: None,
                     reply_to_event_id: payload.reply_to_event_id,
                     forwarded_from: payload.forwarded_from,
+                    service: false,
+                    reaction_marks: Vec::new(),
+                    sender_name: None,
                 })?;
                 true
             }
@@ -570,7 +670,7 @@ impl AppCore {
                 let payload: AttachmentPayload = event.decode_payload()?;
                 self.store.save_message(&Message {
                     event_id: event.event_id.clone(),
-                    conversation_id: conversation,
+                    conversation_id: conversation.to_owned(),
                     sender_user_id: event.sender_user_id.clone(),
                     text: payload.caption,
                     created_at_unix_milliseconds: event.created_at_unix_milliseconds,
@@ -587,6 +687,9 @@ impl AppCore {
                     )),
                     reply_to_event_id: payload.reply_to_event_id,
                     forwarded_from: payload.forwarded_from,
+                    service: false,
+                    reaction_marks: Vec::new(),
+                    sender_name: None,
                 })?;
                 // Файл догружается фоном: история не должна ждать стомегабайтного видео.
                 self.store
@@ -596,7 +699,7 @@ impl AppCore {
             }
             KIND_EDIT => {
                 let payload: EditPayload = event.decode_payload()?;
-                if let Some(mut message) = self.store.message(&payload.target_event_id)?
+                if let Some(mut message) = find(self, &payload.target_event_id)?
                     && message.sender_user_id == event.sender_user_id
                     && !message.deleted
                 {
@@ -608,24 +711,41 @@ impl AppCore {
             }
             KIND_DELETE => {
                 let payload: TargetPayload = event.decode_payload()?;
-                if let Some(mut message) = self.store.message(&payload.target_event_id)?
-                    && message.sender_user_id == event.sender_user_id
+                if let Some(mut message) = find(self, &payload.target_event_id)?
+                    && (message.sender_user_id == event.sender_user_id
+                        || group.is_some_and(|state| {
+                            groups::may_moderate(state, &event.sender_user_id, &message.sender_user_id)
+                        }))
                 {
                     message.deleted = true;
                     message.text.clear();
                     message.attachment = None;
+                    message.reaction_marks.clear();
+                    message.reactions.clear();
                     self.store.save_message(&message)?;
                 }
                 true
             }
             KIND_REACTION => {
                 let payload: ReactionPayload = event.decode_payload()?;
-                if let Some(mut message) = self.store.message(&payload.target_event_id)?
+                if !ALLOWED_REACTIONS.contains(&payload.reaction.as_str()) {
+                    return Ok(false);
+                }
+                if let Some(mut message) = find(self, &payload.target_event_id)?
                     && !message.deleted
                 {
-                    message.reactions.retain(|value| value != &payload.reaction);
-                    if payload.active {
-                        message.reactions.push(payload.reaction);
+                    if group.is_some() {
+                        set_reaction_mark(
+                            &mut message,
+                            &event.sender_user_id,
+                            &payload.reaction,
+                            Some(payload.active),
+                        );
+                    } else {
+                        message.reactions.retain(|value| value != &payload.reaction);
+                        if payload.active {
+                            message.reactions.push(payload.reaction);
+                        }
                     }
                     self.store.save_message(&message)?;
                 }
@@ -633,37 +753,45 @@ impl AppCore {
             }
             KIND_RECEIPT_DELIVERY => {
                 let payload: TargetPayload = event.decode_payload()?;
-                self.store.mark_delivered(&payload.target_event_id)?;
-                false
-            }
-            KIND_RECEIPT_READ => {
-                let payload: TargetPayload = event.decode_payload()?;
-                if let Some(mut message) = self.store.message(&payload.target_event_id)?
+                if group.is_none()
+                    && let Some(mut message) = find(self, &payload.target_event_id)?
                     && message.outgoing
                 {
                     message.delivered = true;
-                    message.read = true;
                     self.store.save_message(&message)?;
                 }
                 false
             }
+            KIND_RECEIPT_READ => {
+                let payload: TargetPayload = event.decode_payload()?;
+                if let Some(mut message) = find(self, &payload.target_event_id)?
+                    && message.outgoing
+                {
+                    if group.is_some() {
+                        // Участник шлёт квитанцию только на последнее прочитанное: всё,
+                        // что было раньше, он тоже видел.
+                        for mut earlier in self.store.messages(conversation)? {
+                            if earlier.outgoing
+                                && !earlier.service
+                                && !earlier.read
+                                && earlier.created_at_unix_milliseconds
+                                    <= message.created_at_unix_milliseconds
+                            {
+                                earlier.delivered = true;
+                                earlier.read = true;
+                                self.store.save_message(&earlier)?;
+                            }
+                        }
+                    } else {
+                        message.delivered = true;
+                        message.read = true;
+                        self.store.save_message(&message)?;
+                    }
+                }
+                false
+            }
             _ => false,
-        };
-
-        // Квитанция о доставке уходит только по принятому диалогу: она подтверждает
-        // и получение, и то, что мы вообще держим этот канал открытым.
-        if accepted && matches!(event.kind.as_str(), KIND_TEXT | KIND_ATTACHMENT) {
-            self.queue_event(
-                &event.sender_user_id,
-                &format!("evt1-{}", super::random_hex(16)),
-                KIND_RECEIPT_DELIVERY,
-                &TargetPayload {
-                    version: PROTOCOL_VERSION,
-                    target_event_id: event.event_id.clone(),
-                },
-            )?;
-        }
-        Ok(applied)
+        })
     }
 
     fn create_pending_contact(

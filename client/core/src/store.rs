@@ -10,7 +10,7 @@ use crate::{
     blobs::AttachmentManifest,
     identity::StoredIdentity,
     mailbox::{MailboxGrant, OwnedMailbox},
-    models::{Contact, Message, Profile, Settings},
+    models::{Contact, GroupRecord, Message, Profile, Settings},
     prekeys::PrekeyState,
     protocol::SignedProtocolEvent,
     ratchet::RatchetSession,
@@ -28,6 +28,17 @@ pub struct PendingUpload {
     pub reply_to_event_id: Option<String>,
     pub forwarded_from: Option<String>,
     pub attachment: crate::models::Attachment,
+}
+
+/// Изменение группы, пришедшее раньше предыдущих: его нельзя проверить, пока не
+/// известно состояние, на котором оно построено. Лежит, пока не догонят остальные.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingGroupState {
+    pub event_id: String,
+    pub actor: String,
+    pub created_at_unix_milliseconds: i64,
+    pub state: crate::models::GroupState,
 }
 
 /// Событие, ждущее отправки. Шифрование откладывается до самой доставки: пока
@@ -117,7 +128,20 @@ impl Store {
              CREATE TABLE IF NOT EXISTS seen_events(
                event_id TEXT PRIMARY KEY,
                seen_at_ms INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS groups(
+               group_id TEXT PRIMARY KEY,
+               value BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS group_pending_states(
+               event_id TEXT PRIMARY KEY,
+               group_id TEXT NOT NULL,
+               epoch INTEGER NOT NULL,
+               received_at_ms INTEGER NOT NULL,
+               value BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS ix_group_pending_states
+               ON group_pending_states(group_id, epoch);",
         )?;
         Ok(Self {
             connection,
@@ -289,7 +313,8 @@ impl Store {
         let mut unread = 0u32;
         while let Some(row) = rows.next()? {
             let message: Message = self.decrypt_json(&row.get::<_, Vec<u8>>(0)?)?;
-            let incoming = !message.outgoing;
+            // Служебная отметка группы не считается непрочитанным и не прерывает счёт.
+            let incoming = !message.outgoing && !message.service;
             let read = message.read;
             if last.is_none() {
                 last = Some(message);
@@ -717,6 +742,81 @@ impl Store {
         Ok(inserted == 1)
     }
 
+    pub fn groups(&self) -> Result<Vec<GroupRecord>, CoreError> {
+        let mut statement = self.connection.prepare("SELECT value FROM groups")?;
+        let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.map(|value| self.decrypt_json(&value?)).collect()
+    }
+
+    pub fn group(&self, group_id: &str) -> Result<Option<GroupRecord>, CoreError> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT value FROM groups WHERE group_id=?1",
+                [group_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        value.map(|bytes| self.decrypt_json(&bytes)).transpose()
+    }
+
+    pub fn save_group(&self, record: &GroupRecord) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT INTO groups(group_id,value) VALUES(?1,?2)
+             ON CONFLICT(group_id) DO UPDATE SET value=excluded.value",
+            params![record.state.group_id, self.encrypt_json(record)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_pending_group_state(&self, value: &PendingGroupState) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO group_pending_states(event_id,group_id,epoch,received_at_ms,value)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![
+                value.event_id,
+                value.state.group_id,
+                value.state.epoch,
+                chrono::Utc::now().timestamp_millis(),
+                self.encrypt_json(value)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn pending_group_states(&self, group_id: &str) -> Result<Vec<PendingGroupState>, CoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT value FROM group_pending_states WHERE group_id=?1 ORDER BY epoch LIMIT 200",
+        )?;
+        let rows = statement.query_map([group_id], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.map(|value| self.decrypt_json(&value?)).collect()
+    }
+
+    pub fn delete_pending_group_state(&self, event_id: &str) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM group_pending_states WHERE event_id=?1",
+            [event_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_pending_group_states(&self, group_id: &str) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM group_pending_states WHERE group_id=?1",
+            [group_id],
+        )?;
+        Ok(())
+    }
+
+    /// Недостающее звено может так и не прийти: неделя — срок жизни конверта на Node.
+    pub fn prune_pending_group_states(&self, older_than_ms: i64) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM group_pending_states WHERE received_at_ms < ?1",
+            [older_than_ms],
+        )?;
+        Ok(())
+    }
+
     pub fn revoke_device(&self, device_id: &str) -> Result<(), CoreError> {
         self.connection.execute(
             "INSERT OR REPLACE INTO revoked_devices(device_id,revoked_at_ms) VALUES(?1,?2)",
@@ -732,6 +832,7 @@ impl Store {
             "profile": self.profile()?,
             "settings": self.settings()?,
             "contacts": self.contacts()?,
+            "groups": self.groups()?,
             "events": self.all_messages()?
         }))
     }
@@ -745,12 +846,20 @@ impl Store {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.execute("DELETE FROM contacts", [])?;
         transaction.execute("DELETE FROM events", [])?;
+        transaction.execute("DELETE FROM groups", [])?;
+        transaction.execute("DELETE FROM group_pending_states", [])?;
         transaction.commit()?;
         self.replace_identity(&serde_json::from_value(value["identity"].clone())?)?;
         self.save_profile(&serde_json::from_value(value["profile"].clone())?)?;
         self.save_settings(&serde_json::from_value(value["settings"].clone())?)?;
         for contact in serde_json::from_value::<Vec<Contact>>(value["contacts"].clone())? {
             self.save_contact(&contact)?;
+        }
+        // Копии, снятые до появления групп, поля `groups` не содержат.
+        if let Some(groups) = value.get("groups").filter(|groups| groups.is_array()) {
+            for group in serde_json::from_value::<Vec<GroupRecord>>(groups.clone())? {
+                self.save_group(&group)?;
+            }
         }
         for message in serde_json::from_value::<Vec<Message>>(value["events"].clone())? {
             self.save_message(&message)?;

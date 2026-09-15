@@ -15,6 +15,7 @@ use rand_core::{OsRng, RngCore};
 use serde_json::json;
 
 mod delivery;
+mod groups;
 
 use crate::{
     CoreError,
@@ -22,18 +23,58 @@ use crate::{
     identity::{StoredIdentity, conversation_id},
     media::{self, Progress},
     models::{
-        Attachment, Chat, Command, Contact, MediaKind, Message, MetadataProtection, Profile,
-        Response, SearchHit, Snapshot,
+        Attachment, Chat, Command, Contact, GroupPermissions, GroupRecord, MediaKind, Message,
+        MetadataProtection, Profile, ReactionMark, Response, SearchHit, Snapshot,
     },
     network::{MailboxWatch, Network, expected_node_for},
     protocol::{
         AttachmentPayload, EditPayload, KIND_ATTACHMENT, KIND_DELETE, KIND_EDIT, KIND_REACTION,
         KIND_RECEIPT_DELIVERY, KIND_RECEIPT_READ, KIND_TEXT, PROTOCOL_VERSION, ReactionPayload,
-        TargetPayload,
-        TextPayload,
+        TargetPayload, TextPayload, is_group_id,
     },
     store::Store,
 };
+
+/// Реакции, которые понимают все клиенты. Чужую, пришедшую по сети, ядро просто не применит.
+pub(super) const ALLOWED_REACTIONS: &[&str] = &["❤", "🔥", "👌", "😱", "😭", "🤨", "👍", "💔"];
+
+/// Флаги строки списка чатов — одинаковые у личного диалога и группы.
+struct ChatFlags {
+    pinned: bool,
+    muted: bool,
+    draft: String,
+    manual_unread: bool,
+}
+
+/// Реакция конкретного участника группы. Возвращает, стоит ли она теперь.
+pub(super) fn set_reaction_mark(
+    message: &mut Message,
+    user_id: &str,
+    reaction: &str,
+    active: Option<bool>,
+) -> bool {
+    let present = message
+        .reaction_marks
+        .iter()
+        .any(|mark| mark.user_id == user_id && mark.reaction == reaction);
+    let active = active.unwrap_or(!present);
+    message
+        .reaction_marks
+        .retain(|mark| !(mark.user_id == user_id && mark.reaction == reaction));
+    if active {
+        message.reaction_marks.push(ReactionMark {
+            user_id: user_id.to_owned(),
+            reaction: reaction.to_owned(),
+        });
+    }
+    message.reactions.clear();
+    for mark in &message.reaction_marks {
+        if !message.reactions.contains(&mark.reaction) {
+            message.reactions.push(mark.reaction.clone());
+        }
+    }
+    active
+}
 
 /// Размер в понятном человеку виде: сообщение об отказе должно называть предел так,
 /// как его назвал бы сам пользователь, а не в байтах.
@@ -211,6 +252,18 @@ impl AppCore {
                 query,
                 display_name,
             } => self.add_contact(&query, display_name)?,
+            // Удаление чата группы — это выход из неё; отказ от приглашения — тоже.
+            Command::DeleteContact { user_id } | Command::RejectContact { user_id }
+                if is_group_id(&user_id) =>
+            {
+                self.leave_group(&user_id, true)?
+            }
+            Command::AcceptContact { user_id } if is_group_id(&user_id) => {
+                self.accept_group_invite(&user_id)?
+            }
+            Command::MarkRead { user_id } if is_group_id(&user_id) => {
+                self.mark_group_read(&user_id)?
+            }
             Command::DeleteContact { user_id } | Command::RejectContact { user_id } => {
                 self.store.delete_contact(&user_id)?;
                 if self.selected_contact.as_deref() == Some(&user_id) {
@@ -260,7 +313,7 @@ impl AppCore {
                 self.forward_messages(&event_ids, &user_id)?
             }
             Command::SetChatPinned { user_id, pinned } => {
-                self.update_contact(&user_id, |contact| contact.pinned = pinned)?;
+                self.update_chat(&user_id, |flags| flags.pinned = pinned)?;
                 self.status = if pinned {
                     "Чат закреплён".to_owned()
                 } else {
@@ -268,7 +321,7 @@ impl AppCore {
                 };
             }
             Command::SetChatMuted { user_id, muted } => {
-                self.update_contact(&user_id, |contact| contact.muted = muted)?;
+                self.update_chat(&user_id, |flags| flags.muted = muted)?;
                 self.status = if muted {
                     "Уведомления выключены".to_owned()
                 } else {
@@ -277,15 +330,15 @@ impl AppCore {
             }
             Command::SaveDraft { user_id, text } => {
                 let draft = text.trim().to_owned();
-                self.update_contact(&user_id, |contact| contact.draft = draft)?;
+                self.update_chat(&user_id, |flags| flags.draft = draft)?;
             }
             Command::ClearHistory { user_id } => {
-                let conversation = conversation_id(&self.identity.public.user_id, &user_id);
+                let conversation = self.chat_conversation(&user_id);
                 self.store.clear_conversation(&conversation)?;
                 self.status = "История диалога очищена".to_owned();
             }
             Command::MarkUnread { user_id } => {
-                self.update_contact(&user_id, |contact| contact.manual_unread = true)?;
+                self.update_chat(&user_id, |flags| flags.manual_unread = true)?;
             }
             Command::Search { query } => self.search_query = query.trim().to_owned(),
             Command::SetPresencePublishing { enabled } => {
@@ -312,17 +365,21 @@ impl AppCore {
                     return Err(CoreError::InvalidInput("Сообщение пустое".to_owned()));
                 }
                 let mut message = self.require_message(&event_id)?;
-                if !message.outgoing || message.deleted {
+                if !message.outgoing || message.deleted || message.service {
                     return Err(CoreError::InvalidInput(
                         "Сообщение нельзя изменить".to_owned(),
                     ));
                 }
+                let chat = self.chat_of(&message)?;
+                if let Some(group) = chat.as_deref().filter(|id| is_group_id(id)) {
+                    self.ensure_group_writable(group)?;
+                }
                 message.text = text.trim().to_owned();
                 message.edited = true;
                 self.store.save_message(&message)?;
-                if let Some(user_id) = self.peer_of(&message)? {
-                    self.queue_event(
-                        &user_id,
+                if let Some(chat) = chat {
+                    self.queue_for_chat(
+                        &chat,
                         &format!("evt1-{}", random_hex(16)),
                         KIND_EDIT,
                         &EditPayload {
@@ -336,24 +393,44 @@ impl AppCore {
                 self.status = "Изменение отправлено".to_owned();
             }
             Command::DeleteMessages { event_ids } => {
+                let me = self.identity.public.user_id.clone();
                 for event_id in event_ids {
                     let mut message = self.require_message(&event_id)?;
-                    if message.outgoing && !message.deleted {
-                        message.deleted = true;
-                        message.text.clear();
-                        message.attachment = None;
-                        self.store.save_message(&message)?;
-                        if let Some(user_id) = self.peer_of(&message)? {
-                            self.queue_event(
-                                &user_id,
-                                &format!("evt1-{}", random_hex(16)),
-                                KIND_DELETE,
-                                &TargetPayload {
-                                    version: PROTOCOL_VERSION,
-                                    target_event_id: message.event_id.clone(),
-                                },
-                            )?;
-                        }
+                    if message.deleted || message.service {
+                        continue;
+                    }
+                    let chat = self.chat_of(&message)?;
+                    let in_group = chat.as_deref().is_some_and(is_group_id);
+                    let writable = match chat.as_deref() {
+                        Some(group) if in_group => self.ensure_group_writable(group).ok(),
+                        _ => None,
+                    };
+                    // Чужое сообщение в группе удаляет только старший по роли — и у всех сразу.
+                    let moderated = !message.outgoing
+                        && writable.as_ref().is_some_and(|record| {
+                            groups::may_moderate(&record.state, &me, &message.sender_user_id)
+                        });
+                    if !message.outgoing && !moderated {
+                        continue;
+                    }
+                    message.deleted = true;
+                    message.text.clear();
+                    message.attachment = None;
+                    message.reaction_marks.clear();
+                    message.reactions.clear();
+                    self.store.save_message(&message)?;
+                    if let Some(chat) = chat
+                        && (!in_group || writable.is_some())
+                    {
+                        self.queue_for_chat(
+                            &chat,
+                            &format!("evt1-{}", random_hex(16)),
+                            KIND_DELETE,
+                            &TargetPayload {
+                                version: PROTOCOL_VERSION,
+                                target_event_id: message.event_id.clone(),
+                            },
+                        )?;
                     }
                 }
                 self.deliver_now();
@@ -377,23 +454,33 @@ impl AppCore {
                 event_ids,
                 reaction,
             } => {
-                const ALLOWED: &[&str] = &["❤", "🔥", "👌", "😱", "😭", "🤨", "👍", "💔"];
-                if !ALLOWED.contains(&reaction.as_str()) {
+                if !ALLOWED_REACTIONS.contains(&reaction.as_str()) {
                     return Err(CoreError::InvalidInput("Неизвестная реакция".to_owned()));
                 }
+                let me = self.identity.public.user_id.clone();
                 for event_id in event_ids {
                     let mut message = self.require_message(&event_id)?;
-                    if !message.deleted {
-                        let active = !message.reactions.contains(&reaction);
-                        if active {
-                            message.reactions.push(reaction.clone());
+                    let chat = self.chat_of(&message)?;
+                    let group = chat.as_deref().filter(|id| is_group_id(id));
+                    if group.is_some_and(|group| self.ensure_group_writable(group).is_err()) {
+                        continue;
+                    }
+                    if !message.deleted && !message.service {
+                        let active = if group.is_some() {
+                            set_reaction_mark(&mut message, &me, &reaction, None)
                         } else {
-                            message.reactions.retain(|v| v != &reaction);
-                        }
+                            let active = !message.reactions.contains(&reaction);
+                            if active {
+                                message.reactions.push(reaction.clone());
+                            } else {
+                                message.reactions.retain(|v| v != &reaction);
+                            }
+                            active
+                        };
                         self.store.save_message(&message)?;
-                        if let Some(user_id) = self.peer_of(&message)? {
-                            self.queue_event(
-                                &user_id,
+                        if let Some(chat) = chat {
+                            self.queue_for_chat(
+                                &chat,
                                 &format!("evt1-{}", random_hex(16)),
                                 KIND_REACTION,
                                 &ReactionPayload {
@@ -567,16 +654,8 @@ impl AppCore {
                 duration_milliseconds,
                 thumbnail_base64,
             } => {
-                // Контакт проверяется сразу: незачем шифровать 300 МБ, чтобы потом отказать.
-                let contact = self
-                    .store
-                    .contact(&user_id)?
-                    .ok_or_else(|| CoreError::InvalidInput("Контакт не найден".to_owned()))?;
-                if contact.pending_approval {
-                    return Err(CoreError::InvalidInput(
-                        "Файлы доступны после принятия контакта".to_owned(),
-                    ));
-                }
+                // Получатель проверяется сразу: незачем шифровать 300 МБ, чтобы потом отказать.
+                self.ensure_chat_writable(&user_id, true)?;
                 let (attachment, progress) = self.prepare_attachment(
                     &path,
                     &mime_type,
@@ -808,8 +887,153 @@ impl AppCore {
                 self.store.revoke_device(&device_id)?;
                 self.status = "Устройство добавлено в подписанный список отзыва".to_owned();
             }
+            Command::CreateGroup {
+                name,
+                about,
+                avatar_base64,
+                member_ids,
+            } => {
+                let group_id = self.create_group(&name, &about, avatar_base64, &member_ids)?;
+                return Ok(Some(json!({ "groupId": group_id })));
+            }
+            Command::AddGroupMembers { group_id, user_ids } => {
+                self.add_group_members(&group_id, &user_ids)?
+            }
+            Command::RemoveGroupMember { group_id, user_id } => {
+                self.remove_group_member(&group_id, &user_id)?
+            }
+            Command::SetGroupRole {
+                group_id,
+                user_id,
+                role,
+            } => self.set_group_role(&group_id, &user_id, role)?,
+            Command::TransferGroupOwnership { group_id, user_id } => {
+                self.transfer_group_ownership(&group_id, &user_id)?
+            }
+            Command::UpdateGroupInfo {
+                group_id,
+                name,
+                about,
+                avatar_base64,
+            } => self.update_group_info(&group_id, &name, &about, avatar_base64)?,
+            Command::SetGroupPermissions {
+                group_id,
+                members_can_invite,
+                members_can_edit_info,
+            } => self.set_group_permissions(
+                &group_id,
+                GroupPermissions {
+                    members_can_invite,
+                    members_can_edit_info,
+                },
+            )?,
+            Command::LeaveGroup { group_id } => self.leave_group(&group_id, false)?,
         }
         Ok(None)
+    }
+
+    /// Диалог, в котором хранятся сообщения чата: у группы это сам GroupID.
+    fn chat_conversation(&self, chat_id: &str) -> String {
+        if is_group_id(chat_id) {
+            chat_id.to_owned()
+        } else {
+            conversation_id(&self.identity.public.user_id, chat_id)
+        }
+    }
+
+    fn update_chat(
+        &mut self,
+        chat_id: &str,
+        update: impl FnOnce(&mut ChatFlags),
+    ) -> Result<(), CoreError> {
+        if is_group_id(chat_id) {
+            let mut record = self.group_record(chat_id)?;
+            let mut flags = ChatFlags {
+                pinned: record.pinned,
+                muted: record.muted,
+                draft: std::mem::take(&mut record.draft),
+                manual_unread: record.manual_unread,
+            };
+            update(&mut flags);
+            record.pinned = flags.pinned;
+            record.muted = flags.muted;
+            record.draft = flags.draft;
+            record.manual_unread = flags.manual_unread;
+            return self.store.save_group(&record);
+        }
+        self.update_contact(chat_id, |contact| {
+            let mut flags = ChatFlags {
+                pinned: contact.pinned,
+                muted: contact.muted,
+                draft: std::mem::take(&mut contact.draft),
+                manual_unread: contact.manual_unread,
+            };
+            update(&mut flags);
+            contact.pinned = flags.pinned;
+            contact.muted = flags.muted;
+            contact.draft = flags.draft;
+            contact.manual_unread = flags.manual_unread;
+        })
+    }
+
+    /// Можно ли сейчас писать в чат. В непринятый личный диалог — только текст.
+    fn ensure_chat_writable(&self, chat_id: &str, attachment: bool) -> Result<(), CoreError> {
+        if is_group_id(chat_id) {
+            return self.ensure_group_writable(chat_id).map(|_| ());
+        }
+        let contact = self
+            .store
+            .contact(chat_id)?
+            .ok_or_else(|| CoreError::InvalidInput("Контакт не найден".to_owned()))?;
+        if attachment && contact.pending_approval {
+            return Err(CoreError::InvalidInput(
+                "Файлы доступны после принятия контакта".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn chat_draft(&self, chat_id: &str) -> Result<String, CoreError> {
+        if is_group_id(chat_id) {
+            return Ok(self.group_record(chat_id)?.draft);
+        }
+        Ok(self
+            .store
+            .contact(chat_id)?
+            .map(|contact| contact.draft)
+            .unwrap_or_default())
+    }
+
+    /// Событие чата: собеседнику лично или всем участникам группы.
+    pub(super) fn queue_for_chat<T: serde::Serialize>(
+        &mut self,
+        chat_id: &str,
+        event_id: &str,
+        kind: &str,
+        payload: &T,
+    ) -> Result<(), CoreError> {
+        if is_group_id(chat_id) {
+            let record = self.ensure_group_writable(chat_id)?;
+            let recipients = self.group_recipients(&record.state);
+            return self.queue_group_event(chat_id, &recipients, event_id, kind, payload);
+        }
+        self.queue_event(chat_id, event_id, kind, payload)
+    }
+
+    /// Имя автора сообщения для подписи «переслано от» и ленты группы.
+    fn sender_name_of(&self, message: &Message) -> Result<String, CoreError> {
+        if is_group_id(&message.conversation_id) {
+            let record = self.store.group(&message.conversation_id)?;
+            return Ok(self.member_display_name(
+                record.as_ref().map(|record| &record.state),
+                &message.sender_user_id,
+            ));
+        }
+        Ok(self
+            .store
+            .contact(&message.sender_user_id)?
+            .map(|value| value.display_name)
+            .unwrap_or_else(|| short_id(&message.sender_user_id)))
     }
 
     fn add_contact(&mut self, query: &str, display_name: Option<String>) -> Result<(), CoreError> {
@@ -899,22 +1123,15 @@ impl AppCore {
                 "Сообщение слишком большое".to_owned(),
             ));
         }
-        let contact = self
-            .store
-            .contact(user_id)?
-            .ok_or_else(|| CoreError::InvalidInput("Контакт не найден".to_owned()))?;
-        if contact.pending_approval && attachment.is_some() {
-            return Err(CoreError::InvalidInput(
-                "Файлы доступны после принятия контакта".to_owned(),
-            ));
-        }
+        self.ensure_chat_writable(user_id, attachment.is_some())?;
+        let draft = self.chat_draft(user_id)?;
         let (attachment, manifest) = match attachment {
             Some((value, manifest)) => (Some(value), manifest),
             None => (None, None),
         };
         let message = Message {
             event_id: format!("evt1-{}", random_hex(16)),
-            conversation_id: conversation_id(&self.identity.public.user_id, user_id),
+            conversation_id: self.chat_conversation(user_id),
             sender_user_id: self.identity.public.user_id.clone(),
             text: text.trim().to_owned(),
             created_at_unix_milliseconds: chrono::Utc::now().timestamp_millis(),
@@ -929,6 +1146,9 @@ impl AppCore {
             attachment,
             reply_to_event_id: reply_to_event_id.clone(),
             forwarded_from: None,
+            service: false,
+            reaction_marks: Vec::new(),
+            sender_name: None,
         };
         self.store.save_message(&message)?;
         match (manifest, message.attachment.clone()) {
@@ -947,7 +1167,7 @@ impl AppCore {
             (Some(manifest), _) => {
                 self.store
                     .save_event_manifest(&message.event_id, &manifest)?;
-                self.queue_event(
+                self.queue_for_chat(
                     user_id,
                     &message.event_id,
                     KIND_ATTACHMENT,
@@ -960,7 +1180,7 @@ impl AppCore {
                     },
                 )?;
             }
-            (None, None) => self.queue_event(
+            (None, None) => self.queue_for_chat(
                 user_id,
                 &message.event_id,
                 KIND_TEXT,
@@ -972,8 +1192,8 @@ impl AppCore {
                 },
             )?,
         }
-        if !contact.draft.is_empty() {
-            self.update_contact(user_id, |value| value.draft.clear())?;
+        if !draft.is_empty() {
+            self.update_chat(user_id, |flags| flags.draft.clear())?;
         }
         self.deliver_now();
         Ok(())
@@ -1002,7 +1222,9 @@ impl AppCore {
             self.status = "Сообщение в очереди: адрес ещё не опубликован".to_owned();
             return;
         }
-        match self.flush_outbox(&node) {
+        // Одна пачка: в большую группу остальное дошлёт фоновая синхронизация, а
+        // интерфейс не ждёт, пока сообщение зашифруется под сотню участников.
+        match self.flush_outbox_limited(&node, 50) {
             Ok(count) if count > 0 => self.status = "Отправлено".to_owned(),
             Ok(_) => {}
             Err(error) => self.status = format!("Сообщение в очереди: {error}"),
@@ -1011,30 +1233,30 @@ impl AppCore {
 
     /// Пересылка сообщений в другой диалог с сохранением автора оригинала.
     fn forward_messages(&mut self, event_ids: &[String], user_id: &str) -> Result<(), CoreError> {
-        let target = self
-            .store
-            .contact(user_id)?
-            .ok_or_else(|| CoreError::InvalidInput("Контакт не найден".to_owned()))?;
-        if target.pending_approval {
-            return Err(CoreError::InvalidInput(
-                "Переслать можно только в принятый диалог".to_owned(),
-            ));
+        if is_group_id(user_id) {
+            self.ensure_group_writable(user_id)?;
+        } else {
+            let target = self
+                .store
+                .contact(user_id)?
+                .ok_or_else(|| CoreError::InvalidInput("Контакт не найден".to_owned()))?;
+            if target.pending_approval {
+                return Err(CoreError::InvalidInput(
+                    "Переслать можно только в принятый диалог".to_owned(),
+                ));
+            }
         }
         let own_name = self.store.profile()?.display_name;
-        let conversation = conversation_id(&self.identity.public.user_id, user_id);
+        let conversation = self.chat_conversation(user_id);
         for event_id in event_ids {
             let source = self.require_message(event_id)?;
-            if source.deleted {
+            if source.deleted || source.service {
                 continue;
             }
             let author = match source.forwarded_from.clone() {
                 Some(value) => value,
                 None if source.outgoing => own_name.clone(),
-                None => self
-                    .store
-                    .contact(&source.sender_user_id)?
-                    .map(|value| value.display_name)
-                    .unwrap_or_else(|| short_id(&source.sender_user_id)),
+                None => self.sender_name_of(&source)?,
             };
             // Файл пересылается ссылкой на тот же объект в хранилище: выкладывать
             // его заново незачем, ключ и без того есть у обеих сторон.
@@ -1063,13 +1285,16 @@ impl AppCore {
                 attachment: source.attachment.clone(),
                 reply_to_event_id: None,
                 forwarded_from: Some(author.clone()),
+                service: false,
+                reaction_marks: Vec::new(),
+                sender_name: None,
             };
             self.store.save_message(&message)?;
             match manifest {
                 Some(manifest) => {
                     self.store
                         .save_event_manifest(&message.event_id, &manifest)?;
-                    self.queue_event(
+                    self.queue_for_chat(
                         user_id,
                         &message.event_id,
                         KIND_ATTACHMENT,
@@ -1082,7 +1307,7 @@ impl AppCore {
                         },
                     )?;
                 }
-                None => self.queue_event(
+                None => self.queue_for_chat(
                     user_id,
                     &message.event_id,
                     KIND_TEXT,
@@ -1102,8 +1327,15 @@ impl AppCore {
         Ok(())
     }
 
-    /// Собеседник события: сообщения хранятся по диалогу, а адресуется отправка человеку.
-    fn peer_of(&self, message: &Message) -> Result<Option<String>, CoreError> {
+    /// Чат события: сообщения хранятся по диалогу, а адресуется отправка человеку или группе.
+    fn chat_of(&self, message: &Message) -> Result<Option<String>, CoreError> {
+        if is_group_id(&message.conversation_id) {
+            return Ok(self
+                .store
+                .group(&message.conversation_id)?
+                .filter(|record| !record.hidden)
+                .map(|record| record.state.group_id));
+        }
         Ok(self.store.contacts()?.into_iter().find_map(|contact| {
             (conversation_id(&self.identity.public.user_id, &contact.user_id)
                 == message.conversation_id)
@@ -1432,7 +1664,35 @@ impl AppCore {
     fn snapshot(&self) -> Result<Snapshot, CoreError> {
         let profile = self.store.profile()?;
         let chats = self.chats()?;
+        let mut group = None;
         let messages = match self.selected_contact.as_deref() {
+            Some(group_id) if is_group_id(group_id) => {
+                match self.store.group(group_id)?.filter(|record| !record.hidden) {
+                    Some(record) => {
+                        let mut messages = self.store.messages(group_id)?;
+                        let mut names: std::collections::HashMap<String, String> =
+                            std::collections::HashMap::new();
+                        for message in &mut messages {
+                            if message.outgoing || message.service {
+                                continue;
+                            }
+                            let name = names
+                                .entry(message.sender_user_id.clone())
+                                .or_insert_with(|| {
+                                    self.member_display_name(
+                                        Some(&record.state),
+                                        &message.sender_user_id,
+                                    )
+                                })
+                                .clone();
+                            message.sender_name = Some(name);
+                        }
+                        group = Some(self.group_view(&record)?);
+                        messages
+                    }
+                    None => Vec::new(),
+                }
+            }
             Some(user_id) => self
                 .store
                 .messages(&conversation_id(&self.identity.public.user_id, user_id))?,
@@ -1450,6 +1710,7 @@ impl AppCore {
             status_message: self.status.clone(),
             search_query: self.search_query.clone(),
             search_results: self.search_results()?,
+            group,
         })
     }
 
@@ -1459,8 +1720,32 @@ impl AppCore {
             return Ok(Vec::new());
         }
         let contacts = self.store.contacts()?;
+        let groups: std::collections::HashMap<String, GroupRecord> = self
+            .store
+            .groups()?
+            .into_iter()
+            .filter(|record| !record.hidden)
+            .map(|record| (record.state.group_id.clone(), record))
+            .collect();
         let mut hits = Vec::new();
         for message in self.store.search_messages(&self.search_query, 60)? {
+            if message.service {
+                continue;
+            }
+            if is_group_id(&message.conversation_id) {
+                if let Some(record) = groups.get(&message.conversation_id) {
+                    hits.push(SearchHit {
+                        event_id: message.event_id,
+                        user_id: record.state.group_id.clone(),
+                        display_name: record.state.name.clone(),
+                        avatar_base64: record.state.avatar_base64.clone(),
+                        text: message.text,
+                        created_at_unix_milliseconds: message.created_at_unix_milliseconds,
+                        outgoing: message.outgoing,
+                    });
+                }
+                continue;
+            }
             let contact = contacts.iter().find(|contact| {
                 conversation_id(&self.identity.public.user_id, &contact.user_id)
                     == message.conversation_id
@@ -1495,6 +1780,10 @@ impl AppCore {
                     last_message_read: message.read,
                     unread_count,
                     contact,
+                    is_group: false,
+                    member_count: 0,
+                    group_role: None,
+                    group_left: false,
                 },
                 None => Chat {
                     preview: String::new(),
@@ -1505,6 +1794,83 @@ impl AppCore {
                     last_message_read: false,
                     unread_count: 0,
                     contact,
+                    is_group: false,
+                    member_count: 0,
+                    group_role: None,
+                    group_left: false,
+                },
+            });
+        }
+        let me = self.identity.public.user_id.clone();
+        for record in self.store.groups()? {
+            if record.hidden {
+                continue;
+            }
+            let group_id = record.state.group_id.clone();
+            let (last, unread_count) = self.store.conversation_preview(&group_id)?;
+            let contact = Contact {
+                user_id: group_id,
+                display_name: record.state.name.clone(),
+                username: None,
+                about: (!record.state.about.is_empty()).then(|| record.state.about.clone()),
+                avatar_base64: record.state.avatar_base64.clone(),
+                added_at_unix_milliseconds: record.joined_at_unix_milliseconds,
+                fingerprint_verified: false,
+                pending_approval: record.pending_invite,
+                last_seen_unix_milliseconds: None,
+                pinned: record.pinned,
+                muted: record.muted,
+                draft: record.draft.clone(),
+                manual_unread: record.manual_unread,
+            };
+            let group_role = if record.left {
+                None
+            } else {
+                groups::role_of(&record.state, &me)
+            };
+            let member_count = record.state.members.len() as u32;
+            chats.push(match last {
+                Some(message) => {
+                    // В группе превью подписано автором, как в Telegram.
+                    let preview = if message.service || message.deleted {
+                        preview_of(&message)
+                    } else if message.outgoing {
+                        format!("Вы: {}", preview_of(&message))
+                    } else {
+                        format!(
+                            "{}: {}",
+                            self.member_display_name(Some(&record.state), &message.sender_user_id),
+                            preview_of(&message)
+                        )
+                    };
+                    Chat {
+                        preview,
+                        last_activity_unix_milliseconds: message.created_at_unix_milliseconds,
+                        has_last_message: true,
+                        last_message_outgoing: message.outgoing && !message.service,
+                        last_message_delivered: message.delivered,
+                        last_message_read: message.read,
+                        unread_count,
+                        contact,
+                        is_group: true,
+                        member_count,
+                        group_role,
+                        group_left: record.left,
+                    }
+                }
+                None => Chat {
+                    preview: String::new(),
+                    last_activity_unix_milliseconds: record.joined_at_unix_milliseconds,
+                    has_last_message: false,
+                    last_message_outgoing: false,
+                    last_message_delivered: false,
+                    last_message_read: false,
+                    unread_count: 0,
+                    contact,
+                    is_group: true,
+                    member_count,
+                    group_role,
+                    group_left: record.left,
                 },
             });
         }
@@ -1535,6 +1901,7 @@ impl AppCore {
             onboarding_required: true,
             search_query: String::new(),
             search_results: Vec::new(),
+            group: None,
         }
     }
 }
@@ -1742,6 +2109,223 @@ mod tests {
         assert!(window.iter().all(|value| *value == 42));
 
         drop(reader);
+        drop(core);
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn member_id(index: u8) -> String {
+        format!("tt1-{}", hex::encode([index; 32]))
+    }
+
+    fn add_accepted_contact(core: &AppCore, user_id: &str, name: &str) {
+        core.store
+            .save_contact(&Contact {
+                user_id: user_id.to_owned(),
+                display_name: name.to_owned(),
+                username: None,
+                about: None,
+                avatar_base64: None,
+                added_at_unix_milliseconds: 1,
+                fingerprint_verified: false,
+                pending_approval: false,
+                last_seen_unix_milliseconds: None,
+                pinned: false,
+                muted: false,
+                draft: String::new(),
+                manual_unread: false,
+            })
+            .expect("контакт сохраняется");
+    }
+
+    fn call(core: &mut AppCore, command: serde_json::Value) -> serde_json::Value {
+        serde_json::from_str(&core.invoke(&command.to_string())).expect("ответ ядра")
+    }
+
+    /// Полный локальный цикл группы: создание, роли, рассылка каждому участнику, выход.
+    #[test]
+    fn group_lifecycle_fans_out_to_every_member() {
+        let root = std::env::temp_dir().join(format!("turat-group-{}", uuid::Uuid::new_v4()));
+        let mut core = open_core(&root);
+        call(&mut core, json!({"command":"save_profile","username":"","display_name":"Я","about":"","avatar_base64":null}));
+        let alice = member_id(2);
+        let bob = member_id(3);
+        add_accepted_contact(&core, &alice, "Алиса");
+        add_accepted_contact(&core, &bob, "Боб");
+
+        let created = call(&mut core, json!({
+            "command": "create_group",
+            "name": "Команда",
+            "member_ids": [alice, bob, "tt1-0123456789abcdef0123456789abcdef"],
+        }));
+        // Третий id — контакт с неверным форматом: группа из него не соберётся.
+        assert_eq!(created["ok"], false, "{created}");
+
+        let created = call(&mut core, json!({
+            "command": "create_group",
+            "name": "Команда",
+            "member_ids": [alice, bob],
+        }));
+        assert_eq!(created["ok"], true, "{created}");
+        let group_id = created["value"]["groupId"].as_str().unwrap().to_owned();
+        assert_eq!(created["snapshot"]["selectedContactId"], group_id);
+        let chat = created["snapshot"]["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["userId"] == group_id)
+            .cloned()
+            .expect("группа в списке чатов");
+        assert_eq!(chat["isGroup"], true);
+        assert_eq!(chat["memberCount"], 3);
+        assert_eq!(created["snapshot"]["group"]["myRole"], "owner");
+        assert_eq!(created["snapshot"]["group"]["canManageAdmins"], true);
+        assert_eq!(created["snapshot"]["messages"][0]["service"], true);
+        assert_eq!(core.store.outbox_length().unwrap(), 2, "состояние каждому участнику");
+
+        let sent = call(&mut core, json!({"command":"send_text","user_id":group_id,"text":"Привет всем"}));
+        assert_eq!(sent["ok"], true, "{sent}");
+        assert_eq!(core.store.outbox_length().unwrap(), 4);
+        assert_eq!(sent["snapshot"]["chats"][0]["preview"], "Вы: Привет всем");
+
+        let promoted = call(&mut core, json!({"command":"set_group_role","group_id":group_id,"user_id":alice,"role":"admin"}));
+        assert_eq!(promoted["ok"], true, "{promoted}");
+        let members = promoted["snapshot"]["group"]["members"].as_array().unwrap().clone();
+        assert_eq!(members[0]["role"], "owner");
+        assert_eq!(members[1]["role"], "admin");
+        assert_eq!(members[1]["displayName"], "Алиса");
+
+        let owner_role = call(&mut core, json!({"command":"set_group_role","group_id":group_id,"user_id":bob,"role":"owner"}));
+        assert_eq!(owner_role["ok"], false);
+
+        let removed = call(&mut core, json!({"command":"remove_group_member","group_id":group_id,"user_id":bob}));
+        assert_eq!(removed["ok"], true, "{removed}");
+        // Исключённый тоже получает новое состояние — он должен узнать, что его исключили.
+        assert_eq!(core.store.outbox_length().unwrap(), 8);
+        assert_eq!(removed["snapshot"]["group"]["members"].as_array().unwrap().len(), 2);
+
+        let left = call(&mut core, json!({"command":"leave_group","group_id":group_id}));
+        assert_eq!(left["ok"], true, "{left}");
+        assert_eq!(left["snapshot"]["group"]["left"], true);
+        assert_eq!(left["snapshot"]["group"]["canSend"], false);
+        let record = core.store.group(&group_id).unwrap().unwrap();
+        assert_eq!(groups::role_of(&record.state, &alice), Some(crate::models::GroupRole::Owner));
+
+        let refused = call(&mut core, json!({"command":"send_text","user_id":group_id,"text":"после выхода"}));
+        assert_eq!(refused["ok"], false);
+
+        let deleted = call(&mut core, json!({"command":"delete_contact","user_id":group_id}));
+        assert_eq!(deleted["ok"], true, "{deleted}");
+        assert!(deleted["snapshot"]["chats"].as_array().unwrap().iter().all(|chat| chat["userId"] != group_id));
+
+        drop(core);
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn remote_event(
+        sender: &str,
+        group_id: &str,
+        kind: &str,
+        payload: &impl serde::Serialize,
+    ) -> crate::protocol::SignedProtocolEvent {
+        crate::protocol::SignedProtocolEvent {
+            version: PROTOCOL_VERSION,
+            event_id: format!("evt1-{}", random_hex(16)),
+            conversation_id: group_id.to_owned(),
+            sender_user_id: sender.to_owned(),
+            sender_device_id: "ttd1-test".to_owned(),
+            device_sequence: 1,
+            kind: kind.to_owned(),
+            created_at_unix_milliseconds: chrono::Utc::now().timestamp_millis(),
+            payload: STANDARD.encode(serde_json::to_vec(payload).unwrap()),
+            signature: String::new(),
+        }
+    }
+
+    /// Приглашение, самовольное повышение, сообщение от чужака и исключение — со стороны
+    /// получателя. Подписи здесь не проверяются: это делает приём конверта раньше.
+    #[test]
+    fn a_member_only_accepts_authorised_group_changes() {
+        use crate::models::{GroupMember, GroupRole, GroupState};
+        use crate::protocol::{GroupStatePayload, KIND_GROUP_STATE};
+
+        let root = std::env::temp_dir().join(format!("turat-invite-{}", uuid::Uuid::new_v4()));
+        let mut core = open_core(&root);
+        let me = core.identity.public.user_id.clone();
+        let owner = member_id(5);
+        let other = member_id(6);
+        let group_id = format!("ttg1-{}", hex::encode([4u8; 32]));
+        let member = |user_id: &str, role| GroupMember {
+            user_id: user_id.to_owned(),
+            display_name: "Кто-то".to_owned(),
+            role,
+            added_by: owner.clone(),
+            added_at_unix_milliseconds: 1,
+        };
+        let mut state = GroupState {
+            version: groups::GROUP_STATE_VERSION,
+            group_id: group_id.clone(),
+            epoch: 1,
+            name: "Чужая группа".to_owned(),
+            about: String::new(),
+            avatar_base64: None,
+            created_by: owner.clone(),
+            created_at_unix_milliseconds: 1,
+            members: vec![
+                member(&owner, GroupRole::Owner),
+                member(&me, GroupRole::Member),
+                member(&other, GroupRole::Member),
+            ],
+            permissions: Default::default(),
+            updated_by: owner.clone(),
+            updated_at_unix_milliseconds: 1,
+        };
+        let payload = |state: &GroupState| GroupStatePayload { version: PROTOCOL_VERSION, state: state.clone() };
+
+        assert!(core.apply_group_event(&remote_event(&owner, &group_id, KIND_GROUP_STATE, &payload(&state))).unwrap());
+        let record = core.store.group(&group_id).unwrap().unwrap();
+        assert!(record.pending_invite);
+        let refused = call(&mut core, json!({"command":"send_text","user_id":group_id,"text":"до принятия"}));
+        assert_eq!(refused["ok"], false);
+
+        // Рядовой участник выдаёт себе администратора — изменение не применяется.
+        let mut seized = state.clone();
+        seized.epoch = 2;
+        seized.updated_by = other.clone();
+        seized.members[2].role = GroupRole::Admin;
+        assert!(!core.apply_group_event(&remote_event(&other, &group_id, KIND_GROUP_STATE, &payload(&seized))).unwrap());
+        assert_eq!(core.store.group(&group_id).unwrap().unwrap().state.epoch, 1);
+
+        let accepted = call(&mut core, json!({"command":"accept_contact","user_id":group_id}));
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        assert_eq!(core.store.outbox_length().unwrap(), 2, "group.joined обоим участникам");
+
+        // Сообщение от того, кто в группе не состоит, в ленту не попадает.
+        let stranger = member_id(9);
+        let text = TextPayload { version: PROTOCOL_VERSION, text: "спам".to_owned(), reply_to_event_id: None, forwarded_from: None };
+        assert!(!core.apply_group_event(&remote_event(&stranger, &group_id, KIND_TEXT, &text)).unwrap());
+        let text = TextPayload { text: "свои".to_owned(), ..text };
+        assert!(core.apply_group_event(&remote_event(&other, &group_id, KIND_TEXT, &text)).unwrap());
+
+        // Изменение через одно (epoch 3 без 2) ждёт, пока догонит предыдущее.
+        let mut promoted = state.clone();
+        promoted.epoch = 2;
+        promoted.members[2].role = GroupRole::Admin;
+        let mut removed_by_admin = promoted.clone();
+        removed_by_admin.epoch = 3;
+        removed_by_admin.updated_by = other.clone();
+        removed_by_admin.members.retain(|value| value.user_id != me);
+        assert!(!core.apply_group_event(&remote_event(&other, &group_id, KIND_GROUP_STATE, &payload(&removed_by_admin))).unwrap());
+        assert_eq!(core.store.group(&group_id).unwrap().unwrap().state.epoch, 1);
+        assert!(core.apply_group_event(&remote_event(&owner, &group_id, KIND_GROUP_STATE, &payload(&promoted))).unwrap());
+        let record = core.store.group(&group_id).unwrap().unwrap();
+        assert_eq!(record.state.epoch, 3, "отложенное изменение применилось следом");
+        assert!(record.left);
+
+        let messages = core.store.messages(&group_id).unwrap();
+        assert!(messages.iter().any(|message| message.service && message.text.contains("исключил(а) вас")));
+        state.epoch = 4;
+        assert!(!core.apply_group_event(&remote_event(&other, &group_id, KIND_TEXT, &TextPayload { text: "после исключения".to_owned(), version: PROTOCOL_VERSION, reply_to_event_id: None, forwarded_from: None })).unwrap());
+
         drop(core);
         fs::remove_dir_all(root).ok();
     }

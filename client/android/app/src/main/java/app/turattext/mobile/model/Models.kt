@@ -22,6 +22,56 @@ data class Chat(
     val delivered: Boolean,
     val read: Boolean,
     val unreadCount: Int,
+    /** Строка — группа: `contact.userId` тогда содержит GroupID. */
+    val isGroup: Boolean = false,
+    val memberCount: Int = 0,
+    val groupRole: String? = null,
+    val groupLeft: Boolean = false,
+) {
+    /** Писать можно: диалог принят, а из группы пользователь не вышел. */
+    val canWrite get() = !contact.pending && !groupLeft
+}
+
+data class GroupMember(
+    val userId: String,
+    val displayName: String,
+    val avatarBase64: String?,
+    val role: String,
+    val isSelf: Boolean,
+    val isContact: Boolean,
+    val confirmed: Boolean,
+    val addedByName: String,
+) {
+    val rank get() = roleRank(role)
+}
+
+fun roleRank(role: String?): Int = when (role) {
+    "owner" -> 2
+    "admin" -> 1
+    "member" -> 0
+    else -> -1
+}
+
+/** Карточка открытой группы и права текущего пользователя в ней — их считает ядро. */
+data class GroupInfo(
+    val groupId: String,
+    val name: String,
+    val about: String,
+    val avatarBase64: String?,
+    val epoch: Long,
+    val myRole: String?,
+    val pendingInvite: Boolean,
+    val invitedByName: String?,
+    val left: Boolean,
+    val membersCanInvite: Boolean,
+    val membersCanEditInfo: Boolean,
+    val members: List<GroupMember>,
+    val canSend: Boolean,
+    val canInvite: Boolean,
+    val canEditInfo: Boolean,
+    val canRemoveMembers: Boolean,
+    val canManageAdmins: Boolean,
+    val canDeleteMessages: Boolean,
 )
 
 /** Категория вложения: от неё зависит, рисует ли пузырь превью, плеер или карточку файла. */
@@ -56,6 +106,10 @@ data class Message(
     val outgoing: Boolean, val edited: Boolean, val deleted: Boolean, val reactions: List<String>,
     val delivered: Boolean, val read: Boolean, val attachment: Attachment?,
     val replyToEventId: String? = null, val forwardedFrom: String? = null,
+    /** Служебная отметка группы: рисуется по центру, действий с ней нет. */
+    val service: Boolean = false,
+    /** Имя автора в группе; у своих сообщений и в личных диалогах пусто. */
+    val senderName: String? = null,
 )
 
 /** Найденное сообщение в глобальном поиске. */
@@ -72,6 +126,7 @@ data class AppSnapshot(
     val selectedContactId: String? = null, val messages: List<Message> = emptyList(), val settings: Settings = Settings(),
     val online: Boolean = false, val statusMessage: String = "", val onboardingRequired: Boolean = true,
     val searchQuery: String = "", val searchResults: List<SearchHit> = emptyList(),
+    val group: GroupInfo? = null,
 ) {
     val selectedChat get() = chats.firstOrNull { it.contact.userId == selectedContactId }
     val selectedContact get() = selectedChat?.contact
@@ -137,8 +192,10 @@ object CoreJson {
                         a.optStringOrNull("thumbnailBase64"),
                     )
                 },
-                it.optStringOrNull("replyToEventId"), it.optStringOrNull("forwardedFrom"))
+                it.optStringOrNull("replyToEventId"), it.optStringOrNull("forwardedFrom"),
+                it.optBoolean("service"), it.optStringOrNull("senderName"))
         },
+        group = value.optJSONObject("group")?.let(::group),
         settings = value.getJSONObject("settings").let {
             Settings(it.getString("bootstrapUrl"), it.getString("metadataProtection"), it.optBoolean("publishPresence"))
         },
@@ -169,7 +226,41 @@ object CoreJson {
         delivered = value.optBoolean("lastMessageDelivered"),
         read = value.optBoolean("lastMessageRead"),
         unreadCount = value.optInt("unreadCount"),
+        isGroup = value.optBoolean("isGroup"),
+        memberCount = value.optInt("memberCount"),
+        groupRole = value.optStringOrNull("groupRole"),
+        groupLeft = value.optBoolean("groupLeft"),
     )
+
+    private fun group(value: JSONObject): GroupInfo {
+        val permissions = value.optJSONObject("permissions")
+        return GroupInfo(
+            groupId = value.getString("groupId"),
+            name = value.optString("name"),
+            about = value.optString("about"),
+            avatarBase64 = value.optStringOrNull("avatarBase64"),
+            epoch = value.optLong("epoch"),
+            myRole = value.optStringOrNull("myRole"),
+            pendingInvite = value.optBoolean("pendingInvite"),
+            invitedByName = value.optStringOrNull("invitedByName"),
+            left = value.optBoolean("left"),
+            membersCanInvite = permissions?.optBoolean("membersCanInvite") == true,
+            membersCanEditInfo = permissions?.optBoolean("membersCanEditInfo") == true,
+            members = value.optJSONArray("members")?.objects().orEmpty().map {
+                GroupMember(
+                    it.getString("userId"), it.optString("displayName"), it.optStringOrNull("avatarBase64"),
+                    it.optString("role"), it.optBoolean("isSelf"), it.optBoolean("isContact"),
+                    it.optBoolean("confirmed"), it.optString("addedByName"),
+                )
+            },
+            canSend = value.optBoolean("canSend"),
+            canInvite = value.optBoolean("canInvite"),
+            canEditInfo = value.optBoolean("canEditInfo"),
+            canRemoveMembers = value.optBoolean("canRemoveMembers"),
+            canManageAdmins = value.optBoolean("canManageAdmins"),
+            canDeleteMessages = value.optBoolean("canDeleteMessages"),
+        )
+    }
 
     private fun JSONArray.objects() = (0 until length()).map(::getJSONObject)
     private fun JSONArray.strings() = (0 until length()).map(::getString)

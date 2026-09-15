@@ -108,6 +108,28 @@ class MainActivity : ComponentActivity() {
                         )
                     ) { saved -> if (saved) model.execute(CoreJson.command("publish_profile")) }
                 }
+                var pendingGroupAvatar by remember { mutableStateOf<String?>(null) }
+                val groupAvatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                    val groupId = pendingGroupAvatar
+                    pendingGroupAvatar = null
+                    if (uri == null || groupId == null) return@rememberLauncherForActivityResult
+                    // Фото группы едет внутри её состояния и должно пролезать в публичный ящик
+                    // участника: сначала обычное качество, детальный снимок — сильнее.
+                    val encoded = encodeAvatar(this, uri, 160, 82)?.takeIf { it.length <= GroupAvatarLimit }
+                        ?: encodeAvatar(this, uri, 112, 60)?.takeIf { it.length <= GroupAvatarLimit }
+                    if (encoded == null) {
+                        model.notify("Фото слишком детальное для группы — выберите другое")
+                        return@rememberLauncherForActivityResult
+                    }
+                    val group = model.state.value.group?.takeIf { it.groupId == groupId }
+                        ?: return@rememberLauncherForActivityResult
+                    model.execute(
+                        CoreJson.command(
+                            "update_group_info", "group_id" to groupId, "name" to group.name,
+                            "about" to group.about, "avatar_base64" to encoded,
+                        )
+                    )
+                }
                 val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
                     val action = pendingImport
                     pendingImport = null
@@ -151,6 +173,10 @@ class MainActivity : ComponentActivity() {
                         command = model::execute,
                         pickAttachment = { attachmentPicker.launch("*/*") },
                         pickAvatar = { avatarPicker.launch("image/*") },
+                        pickGroupAvatar = { groupId ->
+                            pendingGroupAvatar = groupId
+                            groupAvatarPicker.launch("image/*")
+                        },
                         saveAttachment = { message ->
                             message.attachment?.let { attachment ->
                                 pendingAttachmentSave = message.eventId
@@ -354,15 +380,18 @@ internal fun encodeThumbnail(source: Bitmap): String? = runCatching {
     Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
 }.getOrNull()
 
-/** Аватар уменьшается до 256 px и кодируется в JPEG: запись профиля должна быть компактной. */
-private fun encodeAvatar(context: Context, uri: Uri): String? = runCatching {
+/** Совпадает с пределом ядра на фото группы в base64. */
+private const val GroupAvatarLimit = 32_000
+
+/** Аватар уменьшается и кодируется в JPEG: запись профиля должна быть компактной. */
+private fun encodeAvatar(context: Context, uri: Uri, edge: Int = 256, quality: Int = 80): String? = runCatching {
     val source = context.contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream) ?: return null
     val size = maxOf(source.width, source.height)
-    val scaled = if (size <= 256) source else {
-        Bitmap.createScaledBitmap(source, source.width * 256 / size, source.height * 256 / size, true)
+    val scaled = if (size <= edge) source else {
+        Bitmap.createScaledBitmap(source, source.width * edge / size, source.height * edge / size, true)
     }
     val output = ByteArrayOutputStream()
-    scaled.compress(Bitmap.CompressFormat.JPEG, 80, output)
+    scaled.compress(Bitmap.CompressFormat.JPEG, quality, output)
     Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
 }.getOrNull()
 

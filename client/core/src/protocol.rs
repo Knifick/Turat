@@ -167,6 +167,41 @@ pub const KIND_REACTION: &str = "message.reaction";
 pub const KIND_ATTACHMENT: &str = "message.attachment";
 pub const KIND_RECEIPT_DELIVERY: &str = "receipt.delivery";
 pub const KIND_RECEIPT_READ: &str = "receipt.read";
+/// Полное новое состояние группы: участники, роли, права, название.
+pub const KIND_GROUP_STATE: &str = "group.state";
+/// Приглашённый принял приглашение. Заодно раздаёт всем участникам свой личный
+/// обратный адрес: без него им пришлось бы писать в узкий публичный ящик.
+pub const KIND_GROUP_JOINED: &str = "group.joined";
+/// Ответ на `group.joined`: новый участник получает обратный адрес в ответ.
+pub const KIND_GROUP_ACK: &str = "group.ack";
+
+/// Событие относится к группе, а не к личному диалогу.
+pub fn is_group_id(value: &str) -> bool {
+    value.strip_prefix("ttg1-").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// UserID — это `tt1-` и SHA-256 identity-ключа в hex.
+pub fn is_user_id(value: &str) -> bool {
+    value.strip_prefix("tt1-").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupStatePayload {
+    pub version: i32,
+    pub state: crate::models::GroupState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupNoticePayload {
+    pub version: i32,
+    pub group_id: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

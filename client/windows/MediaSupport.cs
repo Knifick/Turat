@@ -529,9 +529,17 @@ public sealed partial class MainWindow
     /// <summary>Esc закрывает просмотр вложения раньше, чем до него доберётся остальное окно.</summary>
     private void Root_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != VirtualKey.Escape || MediaViewer.Visibility != Visibility.Visible) return;
-        CloseMediaViewer();
-        e.Handled = true;
+        if (e.Key != VirtualKey.Escape) return;
+        if (MediaViewer.Visibility == Visibility.Visible)
+        {
+            CloseMediaViewer();
+            e.Handled = true;
+        }
+        else if (GroupPage.Visibility == Visibility.Visible)
+        {
+            GroupPage.Visibility = Visibility.Collapsed;
+            e.Handled = true;
+        }
     }
 
     private void CloseMediaViewer()
