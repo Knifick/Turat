@@ -33,6 +33,7 @@ public class NodeIdentityService {
     private final int contactPowBits;
     private final int maxEnvelopeBytes;
     private final long maxMailboxTtlHours;
+    private final long maxBlobBytes;
     private PrivateKey privateKey;
     private String publicKey;
     private String nodeId;
@@ -46,7 +47,8 @@ public class NodeIdentityService {
             @Value("${turattext.v2.envelope-pow-bits:0}") int envelopePowBits,
             @Value("${turattext.v2.contact-pow-bits:0}") int contactPowBits,
             @Value("${turattext.v2.mailbox-max-envelope-bytes:524288}") int maxEnvelopeBytes,
-            @Value("${turattext.v2.mailbox-max-ttl-hours:336}") long maxMailboxTtlHours
+            @Value("${turattext.v2.mailbox-max-ttl-hours:336}") long maxMailboxTtlHours,
+            @Value("${turattext.v2.blob-max-bytes:536870912}") long maxBlobBytes
     ) {
         this.objectMapper = objectMapper;
         this.identityFile = Path.of(identityFile).toAbsolutePath().normalize();
@@ -57,6 +59,7 @@ public class NodeIdentityService {
         this.contactPowBits = Math.clamp(contactPowBits, 0, 28);
         this.maxEnvelopeBytes = maxEnvelopeBytes;
         this.maxMailboxTtlHours = maxMailboxTtlHours;
+        this.maxBlobBytes = maxBlobBytes;
     }
 
     @PostConstruct
@@ -88,7 +91,8 @@ public class NodeIdentityService {
         List<String> transports = List.of("https", "http2", "relay-tls");
         byte[] canonical = canonicalDescriptor(
                 DESCRIPTOR_VERSION, nodeId, nodeName, baseUrl, publicKey, expiresAt, transports,
-                registrationPowBits, envelopePowBits, contactPowBits, maxEnvelopeBytes, maxMailboxTtlHours);
+                registrationPowBits, envelopePowBits, contactPowBits, maxEnvelopeBytes, maxMailboxTtlHours,
+                maxBlobBytes);
         return new NodeDescriptor(
                 DESCRIPTOR_VERSION,
                 nodeId,
@@ -103,6 +107,7 @@ public class NodeIdentityService {
                 contactPowBits,
                 maxEnvelopeBytes,
                 maxMailboxTtlHours,
+                maxBlobBytes,
                 sign(canonical));
     }
 
@@ -129,7 +134,8 @@ public class NodeIdentityService {
             int envelopePowBits,
             int contactPowBits,
             int maxEnvelopeBytes,
-            long maxMailboxTtlHours
+            long maxMailboxTtlHours,
+            long maxBlobBytes
     ) {
         try {
             var bytes = new ByteArrayOutputStream();
@@ -148,6 +154,7 @@ public class NodeIdentityService {
             output.writeInt(contactPowBits);
             output.writeInt(maxEnvelopeBytes);
             output.writeLong(maxMailboxTtlHours);
+            output.writeLong(maxBlobBytes);
             output.flush();
             return bytes.toByteArray();
         } catch (Exception exception) {
@@ -182,6 +189,9 @@ public class NodeIdentityService {
             int contactPowBits,
             int maxEnvelopeBytes,
             long maxMailboxTtlHours,
+            /** Предел на один блоб. Клиент отказывает слишком большому файлу заранее,
+             *  с понятным сообщением, вместо 400 из середины загрузки. */
+            long maxBlobBytes,
             String signature
     ) {
     }

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text;
 using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
@@ -22,20 +23,32 @@ namespace TuratText.Windows;
 public sealed partial class MainWindow : Window
 {
     private static readonly string[] ReactionSet = ["❤", "🔥", "👌", "😱", "😭", "🤨", "👍", "💔"];
+    private static readonly FontFamily IconFontFamily = new("Segoe MDL2 Assets");
 
-    /// <summary>Спокойный интервал при живой связи и частые повторы, пока связи нет.</summary>
+    /// <summary>Запасной интервал опроса и частые повторы, пока связи нет.</summary>
     private static readonly TimeSpan OnlineSyncInterval = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan OfflineRetryInterval = TimeSpan.FromSeconds(6);
+    /// <summary>Окно ожидания конверта; Node ограничивает его своей настройкой.</summary>
+    private const int WaitWindowSeconds = 25;
 
     private readonly RustCore _core;
     private readonly ObservableCollection<object> _sidebar = [];
     private readonly ObservableCollection<object> _feed = [];
+
+    /// <summary>Отпечаток уже нарисованной ленты; <c>null</c> — лента пуста.</summary>
+    private string? _feedSignature;
+
+    /// <summary>Разделитель полей в отпечатке: в тексте сообщения такого символа быть не может.</summary>
+    private const char FieldSeparator = (char)31;
     private readonly ObservableCollection<ChatModel> _forwardTargets = [];
     private readonly DispatcherTimer _searchTimer = new() { Interval = TimeSpan.FromMilliseconds(280) };
-    private readonly DispatcherTimer _syncTimer = new();
     private readonly ObservableCollection<ThemePalette> _themes = [.. ThemeCatalog.All];
+    private readonly ObservableCollection<AppFontChoice> _fonts = [.. FontCatalog.All];
     private ThemePalette _theme = ThemeCatalog.All[0];
+    private AppFontChoice _font = FontCatalog.Default;
     private bool _syncing;
+    private bool _watching;
+    private bool _closing;
     private bool _submitting;
     private AppSnapshot? _snapshot;
     private bool _updating;
@@ -44,6 +57,7 @@ public sealed partial class MainWindow : Window
     private string? _replyToEventId;
     private string? _draftChatId;
     private string[] _forwardEventIds = [];
+    private bool _messageSelectionMode;
 
     public MainWindow()
     {
@@ -57,8 +71,8 @@ public sealed partial class MainWindow : Window
         MessagesList.ItemsSource = _feed;
         ForwardList.ItemsSource = _forwardTargets;
         ThemeList.ItemsSource = _themes;
+        FontList.ItemsSource = _fonts;
         _searchTimer.Tick += SearchTimer_Tick;
-        _syncTimer.Tick += SyncTimer_Tick;
 
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleBar);
@@ -83,9 +97,10 @@ public sealed partial class MainWindow : Window
 
         Closed += (_, _) =>
         {
+            _closing = true;
             _searchTimer.Stop();
-            _syncTimer.Stop();
             PersistDraft();
+            CloseMediaViewer();
             _core.Dispose();
         };
     }
@@ -93,6 +108,7 @@ public sealed partial class MainWindow : Window
     private async void Root_Loaded(object sender, RoutedEventArgs e)
     {
         ApplyTheme(ThemeCatalog.Resolve(UiSettings.ThemeId));
+        ApplyFont(FontCatalog.Resolve(UiSettings.FontId));
         await ExecuteAsync(new { command = "snapshot" });
         // Клиент подключается к Node сам: кнопка синхронизации — ускоритель, а не условие связи.
         await SyncAsync();
@@ -101,17 +117,48 @@ public sealed partial class MainWindow : Window
 
     // --- автоматическая связь с Node -----------------------------------------
 
+    /// <summary>
+    /// Запускает фоновый цикл связи, если он ещё не идёт. Вызов повторно безопасен: кнопки
+    /// «Синхронизировать» и «Подключиться» только убеждаются, что цикл жив.
+    /// </summary>
     private void ScheduleNextSync()
     {
-        _syncTimer.Stop();
-        _syncTimer.Interval = _snapshot?.Online == true ? OnlineSyncInterval : OfflineRetryInterval;
-        _syncTimer.Start();
+        if (_watching || _closing) return;
+        _watching = true;
+        _ = WatchLoopAsync();
     }
 
-    private async void SyncTimer_Tick(object? sender, object e)
+    /// <summary>
+    /// Node держит запрос на входящие открытым и отвечает в тот момент, когда конверт приходит,
+    /// поэтому сообщение попадает в ленту за доли секунды, а не к следующему циклу опроса.
+    /// Опрос по таймеру остаётся запасным путём: пока связи нет и пока Node не умеет ждать.
+    /// </summary>
+    private async Task WatchLoopAsync()
     {
-        await SyncAsync();
-        ScheduleNextSync();
+        try
+        {
+            while (!_closing)
+            {
+                if (_snapshot?.Online != true)
+                {
+                    await Task.Delay(OfflineRetryInterval);
+                }
+                else
+                {
+                    // Ожидание идёт мимо ядра: отправка сообщения его не ждёт.
+                    int awaited = await Task.Run(() => _core.WaitForEnvelopes(WaitWindowSeconds));
+                    // Конверт пришёл или окно истекло — ниже цикл сам за ним сходит.
+                    // Ждать негде (-1) — возвращаемся к прежнему интервалу опроса.
+                    if (awaited < 0) await Task.Delay(OnlineSyncInterval);
+                }
+                if (_closing) return;
+                await SyncAsync();
+            }
+        }
+        finally
+        {
+            _watching = false;
+        }
     }
 
     /// <summary>
@@ -126,6 +173,7 @@ public sealed partial class MainWindow : Window
         {
             CoreResponse result = await Task.Run(() => _core.Invoke(new { command = "sync" }));
             if (result.Snapshot is not null) ApplySnapshot(result.Snapshot);
+            await MarkOpenChatReadAsync();
         }
         catch (Exception exception)
         {
@@ -135,6 +183,25 @@ public sealed partial class MainWindow : Window
         {
             _syncing = false;
         }
+    }
+
+    /// <summary>
+    /// Отмечает прочитанным диалог, который сейчас открыт.
+    /// </summary>
+    /// <remarks>
+    /// Открытый диалог виден пользователю целиком, поэтому пришедшее в него сообщение прочитано
+    /// в тот же момент. Раньше отметка ставилась только при выборе чата, и переписка в уже
+    /// открытом окне так и оставалась непрочитанной.
+    /// </remarks>
+    private async Task MarkOpenChatReadAsync()
+    {
+        if (_snapshot?.SelectedChat is not { UnreadCount: > 0 } chat) return;
+        CoreResponse read = await Task.Run(() => _core.Invoke(new
+        {
+            command = "mark_read",
+            user_id = chat.UserId,
+        }));
+        if (read.Snapshot is not null) ApplySnapshot(read.Snapshot);
     }
 
     // --- ядро -----------------------------------------------------------------
@@ -195,6 +262,10 @@ public sealed partial class MainWindow : Window
         {
             _updating = false;
         }
+
+        // Шаблоны строк создаются после наполнения списков. Применяем гарнитуру на следующем
+        // кадре, когда новые TextBlock уже появились в visual tree.
+        DispatcherQueue.TryEnqueue(() => ApplyFontToTree(Root, _font.Family));
     }
 
     // --- список чатов ---------------------------------------------------------
@@ -254,6 +325,7 @@ public sealed partial class MainWindow : Window
 
     private async Task OpenChatAsync(string userId)
     {
+        if (_messageSelectionMode) ExitMessageSelectionMode();
         await ExecuteAsync(new { command = "select_contact", user_id = userId });
         await ExecuteAsync(new { command = "mark_read", user_id = userId });
     }
@@ -319,6 +391,7 @@ public sealed partial class MainWindow : Window
         if (chat is null)
         {
             _feed.Clear();
+            _feedSignature = null;
             return;
         }
 
@@ -329,7 +402,8 @@ public sealed partial class MainWindow : Window
         ContactOnline.Visibility = chat.OnlineVisibility;
         ContactMuted.Visibility = chat.MutedVisibility;
 
-        if (_draftChatId != chat.UserId)
+        bool switchedChat = _draftChatId != chat.UserId;
+        if (switchedChat)
         {
             _draftChatId = chat.UserId;
             _editingEventId = null;
@@ -338,11 +412,18 @@ public sealed partial class MainWindow : Window
             UpdateBanner();
         }
 
-        // Фоновая синхронизация перестраивает ленту сама по себе: выделение сообщений и место
-        // чтения не должны при этом пропадать.
+        // Перестроение ленты стоит дорого и заметно: Clear() гасит ObservableCollection целиком,
+        // ListView выбрасывает контейнеры и уезжает в начало переписки. Фоновая синхронизация
+        // идёт каждые полминуты, поэтому лента трогается только тогда, когда правда изменилась.
+        string signature = FeedSignature(chat, _snapshot.Messages);
+        if (signature == _feedSignature) return;
+        _feedSignature = signature;
+
+        // Выделение сообщений и место чтения не должны пропадать при перестроении.
         HashSet<string> selectedIds = [.. SelectedMessages().Select(value => value.EventId)];
         string? lastEventId = _feed.OfType<MessageModel>().LastOrDefault()?.EventId;
         bool atBottom = IsScrolledToBottom();
+        double previousOffset = FindScrollViewer(MessagesList)?.VerticalOffset ?? 0;
 
         _feed.Clear();
         IReadOnlyList<MessageModel> messages = _snapshot.Messages;
@@ -366,6 +447,14 @@ public sealed partial class MainWindow : Window
             previous = message;
         }
 
+        foreach (TransferModel transfer in _transfers.Values.Where(value => value.UserId == chat.UserId))
+        {
+            _feed.Add(transfer);
+        }
+
+        // Превью грузятся после того, как лента уже на экране: пузыри не ждут расшифровки.
+        LoadPreviews();
+
         if (selectedIds.Count > 0)
         {
             foreach (MessageModel message in _feed.OfType<MessageModel>()
@@ -375,11 +464,56 @@ public sealed partial class MainWindow : Window
             }
         }
 
-        // Пустая прошлая лента — это только что открытый диалог: его показываем с конца.
-        if (_feed.Count > 0 && (lastEventId is null || atBottom))
+        // Пустая прошлая лента или другой собеседник — диалог показываем с конца.
+        if (_feed.Count > 0 && (switchedChat || lastEventId is null || atBottom))
         {
             MessagesList.ScrollIntoView(_feed[^1]);
         }
+        else if (previousOffset > 0)
+        {
+            // Читающего историю возвращаем туда, где он был: Clear() уже сбросил прокрутку
+            // в начало, и без этого чтение прерывалось бы на каждой перестройке.
+            RestoreScrollOffset(previousOffset);
+        }
+    }
+
+    /// <summary>
+    /// Отпечаток ленты: всё, от чего зависит нарисованное. Сравнение по нему дешевле
+    /// перестроения и, в отличие от равенства записей, не спотыкается о список реакций —
+    /// он сравнивался бы по ссылке и всегда расходился.
+    /// </summary>
+    private static string FeedSignature(ChatModel chat, IReadOnlyList<MessageModel> messages)
+    {
+        var builder = new StringBuilder(messages.Count * 48);
+        builder.Append(chat.UserId).Append('|').Append(chat.DisplayName).AppendLine();
+        foreach (MessageModel message in messages)
+        {
+            builder.Append(message.EventId).Append(FieldSeparator)
+                .Append(message.Text).Append(FieldSeparator)
+                .Append(message.CreatedAtUnixMilliseconds).Append(FieldSeparator)
+                .Append(message.Edited ? '1' : '0')
+                .Append(message.Deleted ? '1' : '0')
+                .Append(message.Delivered ? '1' : '0')
+                .Append(message.Read ? '1' : '0')
+                .Append(message.Pinned ? '1' : '0').Append(FieldSeparator)
+                .Append(string.Join(',', message.Reactions)).Append(FieldSeparator)
+                .Append(message.ReplyToEventId).Append(FieldSeparator)
+                .Append(message.ForwardedFrom).Append(FieldSeparator)
+                .Append(message.Attachment?.AttachmentId).Append(FieldSeparator)
+                .Append(message.Attachment?.Size ?? 0).AppendLine();
+        }
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Возвращает прокрутку на прежнее место. Сразу после наполнения коллекции ListView ещё не
+    /// разложил элементы и не знает своей высоты, поэтому восстановление уходит в следующий
+    /// проход очереди — к нему размеры уже посчитаны.
+    /// </summary>
+    private void RestoreScrollOffset(double offset)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+            FindScrollViewer(MessagesList)?.ChangeView(null, offset, null, disableAnimation: true));
     }
 
     /// <summary>Лента доскроллена до конца — значит новое сообщение можно показать сразу.</summary>
@@ -416,6 +550,8 @@ public sealed partial class MainWindow : Window
         bool separator = args.Item is DaySeparator;
         args.ItemContainer.IsHitTestVisible = !separator;
         args.ItemContainer.IsEnabled = !separator;
+        args.ItemContainer.ContextRequested -= Message_ContextRequested;
+        if (!separator) args.ItemContainer.ContextRequested += Message_ContextRequested;
     }
 
     private void MessagesList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -428,53 +564,60 @@ public sealed partial class MainWindow : Window
             ? Visibility.Collapsed
             : Visibility.Visible;
         EditSelectedButton.IsEnabled = count == 1 && SelectedMessages()[0] is { Outgoing: true, Deleted: false };
+        if (count == 0 && _messageSelectionMode) ExitMessageSelectionMode();
     }
 
     private List<MessageModel> SelectedMessages() =>
         [.. MessagesList.SelectedItems.OfType<MessageModel>()];
 
-    /// <summary>Контекстное меню сообщения: реакции, ответ, пересылка, правка, удаление.</summary>
+    /// <summary>Карточка действий по ПКМ; в режиме мультивыделения её заменяет верхняя панель.</summary>
     private void Message_ContextRequested(UIElement sender, ContextRequestedEventArgs args)
     {
-        if ((sender as FrameworkElement)?.DataContext is not MessageModel message) return;
+        MessageModel? message = sender switch
+        {
+            ListViewItem { Content: MessageModel item } => item,
+            FrameworkElement { DataContext: MessageModel item } => item,
+            _ => null,
+        };
+        if (message is null) return;
+        if (_messageSelectionMode)
+        {
+            args.Handled = true;
+            return;
+        }
         var menu = new MenuFlyout();
+        menu.MenuFlyoutPresenterStyle = (Style)Application.Current.Resources["TgMessageMenuPresenter"];
         if (!message.Deleted)
         {
-            var reactions = new MenuFlyoutSubItem { Text = "Реакция" };
-            foreach (string reaction in ReactionSet)
-            {
-                string value = reaction;
-                var item = new MenuFlyoutItem { Text = value };
-                item.Click += async (_, _) => await ExecuteAsync(new
-                {
-                    command = "react",
-                    event_ids = new[] { message.EventId },
-                    reaction = value,
-                });
-                reactions.Items.Add(item);
-            }
-            menu.Items.Add(reactions);
-            menu.Items.Add(MenuItem("Ответить", "", () =>
+            menu.Items.Add(MessageMenuItem("Ответить", "", () =>
             {
                 _replyToEventId = message.EventId;
                 _editingEventId = null;
                 UpdateBanner();
                 ComposerInput.Focus(FocusState.Programmatic);
             }));
-            menu.Items.Add(MenuItem("Переслать", "", () => ShowForwardDialog([message.EventId])));
-            menu.Items.Add(MenuItem("Копировать", "", () => CopyText(message.Text)));
         }
         if (message is { Outgoing: true, Deleted: false })
         {
-            menu.Items.Add(MenuItem("Изменить", "", () => BeginEdit(message)));
+            menu.Items.Add(MessageMenuItem("Изменить", "", () => BeginEdit(message)));
         }
-        menu.Items.Add(MenuItem("Выделить", "", () => MessagesList.SelectedItems.Add(message)));
+        if (!message.Deleted)
+        {
+            menu.Items.Add(MessageMenuItem(message.PinMenuLabel, "", async () =>
+                await ExecuteAsync(new
+                {
+                    command = "set_message_pinned",
+                    event_id = message.EventId,
+                    pinned = !message.Pinned,
+                })));
+            menu.Items.Add(MessageMenuItem("Переслать", "", () => ShowForwardDialog([message.EventId])));
+        }
         if (message is { Outgoing: true, Deleted: false })
         {
-            menu.Items.Add(new MenuFlyoutSeparator());
-            menu.Items.Add(MenuItem("Удалить", "", async () =>
+            menu.Items.Add(MessageMenuItem("Удалить", "", async () =>
                 await ExecuteAsync(new { command = "delete_messages", event_ids = new[] { message.EventId } })));
         }
+        menu.Items.Add(MessageMenuItem("Выделить", "", () => EnterMessageSelectionMode(message)));
         ShowMenu(menu, sender, args);
     }
 
@@ -560,13 +703,13 @@ public sealed partial class MainWindow : Window
         {
             message = _snapshot?.Messages.FirstOrDefault(value => value.EventId == _editingEventId);
             BannerTitle.Text = "Редактирование";
-            BannerIcon.Glyph = "";
+            BannerIcon.Symbol = Symbol.Edit;
         }
         else if (_replyToEventId is not null)
         {
             message = _snapshot?.Messages.FirstOrDefault(value => value.EventId == _replyToEventId);
             BannerTitle.Text = message?.Outgoing == true ? "Вы" : _snapshot?.SelectedChat?.DisplayName ?? "Ответ";
-            BannerIcon.Glyph = "";
+            BannerIcon.Symbol = Symbol.MailReply;
         }
         BannerText.Text = message?.Quote ?? string.Empty;
         ComposerBanner.Visibility = message is null ? Visibility.Collapsed : Visibility.Visible;
@@ -593,7 +736,21 @@ public sealed partial class MainWindow : Window
 
     // --- панель выделения -----------------------------------------------------
 
-    private void ClearSelection_Click(object sender, RoutedEventArgs e) => MessagesList.SelectedItems.Clear();
+    private void ClearSelection_Click(object sender, RoutedEventArgs e) => ExitMessageSelectionMode();
+
+    private void EnterMessageSelectionMode(MessageModel message)
+    {
+        _messageSelectionMode = true;
+        MessagesList.SelectionMode = ListViewSelectionMode.Multiple;
+        MessagesList.SelectedItems.Add(message);
+    }
+
+    private void ExitMessageSelectionMode()
+    {
+        _messageSelectionMode = false;
+        MessagesList.SelectedItems.Clear();
+        MessagesList.SelectionMode = ListViewSelectionMode.None;
+    }
 
     private void Copy_Click(object sender, RoutedEventArgs e)
     {
@@ -761,6 +918,7 @@ public sealed partial class MainWindow : Window
     {
         if (_snapshot is null) return;
         FillSettings();
+        ShowSettingsCategory("profile");
         SettingsPage.Visibility = Visibility.Visible;
     }
 
@@ -786,7 +944,38 @@ public sealed partial class MainWindow : Window
         NetworkHint.Foreground = (Brush)Application.Current.Resources[_snapshot.Online ? "TgHint" : "TgDanger"];
         ThemeName.Text = _theme.Title;
         ThemeList.SelectedItem = _themes.FirstOrDefault(theme => theme.Id == _theme.Id);
+        FontName.Text = _font.Title;
+        FontList.SelectedItem = _fonts.FirstOrDefault(font => font.Id == _font.Id);
         _updating = false;
+    }
+
+    private void SettingsCategory_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string category }) ShowSettingsCategory(category);
+    }
+
+    /// <summary>В настройках видна только одна компактная категория; выбор оформлен как стеклянные сегменты.</summary>
+    private void ShowSettingsCategory(string category)
+    {
+        ProfileSettingsPanel.Visibility = category == "profile" ? Visibility.Visible : Visibility.Collapsed;
+        AppearanceSettingsPanel.Visibility = category == "appearance" ? Visibility.Visible : Visibility.Collapsed;
+        ConnectionSettingsPanel.Visibility = category == "connection" ? Visibility.Visible : Visibility.Collapsed;
+        DataSettingsPanel.Visibility = category == "data" ? Visibility.Visible : Visibility.Collapsed;
+
+        foreach ((Button button, string id) in new[]
+        {
+            (ProfileCategoryButton, "profile"),
+            (AppearanceCategoryButton, "appearance"),
+            (ConnectionCategoryButton, "connection"),
+            (DataCategoryButton, "data"),
+        })
+        {
+            bool selected = id == category;
+            button.Background = (Brush)Application.Current.Resources[selected ? "TgAccentSoft" : "TgElevated"];
+            button.Foreground = (Brush)Application.Current.Resources[selected ? "TgText" : "TgHint"];
+            button.Opacity = selected ? 1 : 0.82;
+        }
+        SettingsScroll.ChangeView(null, 0, null, disableAnimation: false);
     }
 
     private void CloseSettings_Click(object sender, RoutedEventArgs e) => SettingsPage.Visibility = Visibility.Collapsed;
@@ -901,9 +1090,8 @@ public sealed partial class MainWindow : Window
     {
         if (_snapshot is null) return;
         FillSettings();
+        ShowSettingsCategory("appearance");
         SettingsPage.Visibility = Visibility.Visible;
-        // Прокрутка возможна только после того, как раздел получит размеры: ждём следующий кадр.
-        DispatcherQueue.TryEnqueue(() => ThemeSection.StartBringIntoView());
     }
 
     private void ThemeList_ItemClick(object sender, ItemClickEventArgs e)
@@ -922,11 +1110,64 @@ public sealed partial class MainWindow : Window
         // Встроенные элементы WinUI (поля, диалоги, полосы прокрутки) берут цвета у системы:
         // светлой теме нужна светлая системная схема, иначе текст в них становится нечитаемым.
         Root.RequestedTheme = theme.Dark ? ElementTheme.Dark : ElementTheme.Light;
-        ThemeIcon.Glyph = theme.Dark ? "" : "";
         ToolTipService.SetToolTip(ThemeButton, "Тема: " + theme.Title);
         ThemeName.Text = theme.Title;
         ThemeList.SelectedItem = theme;
         ApplyTitleBarColors(theme);
+    }
+
+    private void FontList_ItemClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is AppFontChoice font && font.Id != _font.Id)
+        {
+            ApplyFont(font);
+            UiSettings.FontId = font.Id;
+        }
+    }
+
+    /// <summary>Меняет гарнитуру уже созданных элементов; FontFamily списков наследуют и новые строки.</summary>
+    private void ApplyFont(AppFontChoice font)
+    {
+        _font = font;
+        FontName.Text = font.Title;
+        FontList.SelectedItem = font;
+        ApplyFontToTree(Root, font.Family);
+    }
+
+    private void ApplyFontToTree(DependencyObject element, FontFamily family)
+    {
+        // У каждой карточки списка свой FontFamily: это живое превью, его нельзя заменить
+        // выбранной глобальной гарнитурой вместе с остальным интерфейсом.
+        if (ReferenceEquals(element, FontList)) return;
+
+        // Пиктограммы сами управляют служебной гарнитурой. Не заходим и в их
+        // внутреннее дерево, иначе выбранный текстовый шрифт превращает их в квадраты.
+        if (element is IconElement) return;
+
+        switch (element)
+        {
+            case TextBlock text when text.FontFamily.Source != "Consolas":
+                text.FontFamily = family;
+                break;
+            case TextBox textBox:
+                textBox.FontFamily = family;
+                break;
+            case PasswordBox passwordBox:
+                passwordBox.FontFamily = family;
+                break;
+            case ToggleSwitch toggleSwitch:
+                toggleSwitch.FontFamily = family;
+                break;
+            case Button { Content: string } button:
+                button.FontFamily = family;
+                break;
+            case MenuFlyoutItem menuItem:
+                menuItem.FontFamily = family;
+                break;
+        }
+
+        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(element); index++)
+            ApplyFontToTree(VisualTreeHelper.GetChild(element, index), family);
     }
 
     /// <summary>Кнопки закрытия и сворачивания рисует система: их цвета задаются отдельно.</summary>
@@ -1000,24 +1241,6 @@ public sealed partial class MainWindow : Window
 
     // --- вложения и пакеты ----------------------------------------------------
 
-    private async void Attach_Click(object sender, RoutedEventArgs e)
-    {
-        if (_snapshot?.SelectedContactId is not string userId) return;
-        StorageFile? file = await OpenFileAsync(["*"]);
-        if (file is null) return;
-        await ExecuteAsync(new
-        {
-            command = "attach_file",
-            user_id = userId,
-            path = file.Path,
-            mime_type = file.ContentType ?? "application/octet-stream",
-            caption = (string?)null,
-            reply_to_event_id = _replyToEventId,
-        });
-        _replyToEventId = null;
-        UpdateBanner();
-    }
-
     private async void CreateBackup_Click(object sender, RoutedEventArgs e) => await ExportSecretAsync("create_backup", "Turat.ttbackup", ".ttbackup");
     private async void RestoreBackup_Click(object sender, RoutedEventArgs e) => await ImportSecretAsync("restore_backup", [".ttbackup"]);
     private async void CreateDeviceLink_Click(object sender, RoutedEventArgs e) => await ExportSecretAsync("create_device_link", "Turat.ttlink", ".ttlink");
@@ -1071,8 +1294,19 @@ public sealed partial class MainWindow : Window
 
     private static MenuFlyoutItem MenuItem(string text, string glyph, Action action)
     {
-        var item = new MenuFlyoutItem { Text = text, Icon = new FontIcon { Glyph = glyph } };
+        var item = new MenuFlyoutItem
+        {
+            Text = text,
+            Icon = new FontIcon { Glyph = glyph, FontFamily = IconFontFamily },
+        };
         item.Click += (_, _) => action();
+        return item;
+    }
+
+    private static MenuFlyoutItem MessageMenuItem(string text, string glyph, Action action)
+    {
+        MenuFlyoutItem item = MenuItem(text, glyph, action);
+        item.Style = (Style)Application.Current.Resources["TgMessageMenuItem"];
         return item;
     }
 

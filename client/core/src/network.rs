@@ -10,7 +10,50 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-use crate::{CoreError, models::DEFAULT_NODE_ID};
+use crate::{
+    CoreError,
+    mailbox::{MailboxEnvelope, MailboxGrant, OwnedMailbox},
+    models::DEFAULT_NODE_ID,
+    prekeys::{
+        ClaimedPrekeyBundle, OneTimePrekeyPublic, PrekeyPublication, SignedDevicePrekey,
+        random_token,
+    },
+    routing::SignedRoutingDescriptor,
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MailboxRegistrationWire {
+    mailbox_id: String,
+    device_hint: String,
+    created_at: String,
+    expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaimedPrekeyWire {
+    user_id: String,
+    device_id: String,
+    identity_json: String,
+    signed_prekey_json: String,
+    one_time_prekey: Option<OneTimePrekeyWire>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OneTimePrekeyWire {
+    prekey_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutingWire {
+    user_id: String,
+    sequence: i64,
+    descriptor_json: String,
+    signature: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +71,9 @@ pub struct NodeDescriptor {
     pub contact_pow_bits: i32,
     pub max_envelope_bytes: i32,
     pub max_mailbox_ttl_hours: i64,
+    /// Предел Node на один блоб. По нему ядро отказывает слишком большому файлу заранее:
+    /// иначе пользователь ждал бы шифрования гигабайта ради 400 на регистрации.
+    pub max_blob_bytes: i64,
     pub signature: String,
 }
 
@@ -133,6 +179,12 @@ impl Network {
         let alive = fetched.elapsed() < DESCRIPTOR_CACHE_TTL
             && descriptor.expires_at_unix_milliseconds > chrono::Utc::now().timestamp_millis();
         alive.then(|| descriptor.clone())
+    }
+
+    /// Уже проверенный дескриптор без обращения к сети: нужен там, где ходить в Node незачем,
+    /// например чтобы отказать слишком большому файлу до начала шифрования.
+    pub fn known_descriptor(&self, base_url: &str) -> Option<NodeDescriptor> {
+        self.cached_descriptor(base_url.trim_end_matches('/'))
     }
 
     /// Смена адреса Node должна проверяться заново, а не браться из кэша прошлого адреса.
@@ -338,6 +390,336 @@ impl Network {
         Ok(Some(claim.last_seen_unix_milliseconds))
     }
 
+    /// Регистрация собственного почтового ящика. Возможности придумывает клиент,
+    /// Node хранит только их хеши — потерянный ящик восстановить нельзя, можно лишь создать новый.
+    pub fn register_mailbox(
+        &self,
+        node: &NodeDescriptor,
+        device_hint: &str,
+    ) -> Result<OwnedMailbox, CoreError> {
+        let read_capability = random_token(32);
+        let write_capability = random_token(32);
+        let contact_capability = random_token(32);
+        let proof = crate::mailbox::registration_proof(
+            &read_capability,
+            &write_capability,
+            &contact_capability,
+            node.registration_pow_bits,
+        );
+        let expires_at =
+            chrono::Utc::now() + chrono::Duration::hours(node.max_mailbox_ttl_hours.max(1));
+        let uri = format!("{}/v2/mailboxes", node.base_url.trim_end_matches('/'));
+        let registration: MailboxRegistrationWire = self
+            .http
+            .post(uri)
+            .json(&json!({
+                "readCapability": read_capability,
+                "writeCapability": write_capability,
+                "contactCapability": contact_capability,
+                "deviceHint": device_hint,
+                "expiresAt": crate::mailbox::rfc3339(expires_at),
+                "proofNonce": proof,
+            }))
+            .send()?
+            .error_for_status()?
+            .json()?;
+        Ok(OwnedMailbox {
+            node_id: node.node_id.clone(),
+            base_url: node.base_url.trim_end_matches('/').to_owned(),
+            mailbox_id: registration.mailbox_id,
+            device_hint: registration.device_hint,
+            read_capability,
+            write_capability,
+            contact_capability,
+            created_at_unix_milliseconds: crate::mailbox::parse_rfc3339(&registration.created_at)?,
+            expires_at_unix_milliseconds: crate::mailbox::parse_rfc3339(&registration.expires_at)?,
+        })
+    }
+
+    pub fn put_envelope(
+        &self,
+        grant: &MailboxGrant,
+        envelope: &MailboxEnvelope,
+        envelope_pow_bits: i32,
+    ) -> Result<(), CoreError> {
+        let uri = format!(
+            "{}/v2/mailboxes/{}/envelopes",
+            grant.base_url.trim_end_matches('/'),
+            grant.mailbox_id
+        );
+        self.http
+            .put(uri)
+            .header("X-Mailbox-Write-Capability", &grant.write_capability)
+            .header(
+                "X-Envelope-Pow-Nonce",
+                crate::mailbox::envelope_proof(&grant.mailbox_id, envelope, envelope_pow_bits),
+            )
+            .json(envelope)
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn fetch_envelopes(
+        &self,
+        mailbox: &OwnedMailbox,
+        limit: u32,
+    ) -> Result<Vec<MailboxEnvelope>, CoreError> {
+        let uri = format!(
+            "{}/v2/mailboxes/{}/envelopes?limit={}",
+            mailbox.base_url.trim_end_matches('/'),
+            mailbox.mailbox_id,
+            limit.clamp(1, 200)
+        );
+        Ok(self
+            .http
+            .get(uri)
+            .header("X-Mailbox-Read-Capability", &mailbox.read_capability)
+            .send()?
+            .error_for_status()?
+            .json()?)
+    }
+
+    /// Подтверждение приёма: только после него Node удаляет конверт.
+    pub fn acknowledge(
+        &self,
+        mailbox: &OwnedMailbox,
+        envelope_ids: &[String],
+    ) -> Result<(), CoreError> {
+        if envelope_ids.is_empty() {
+            return Ok(());
+        }
+        let uri = format!(
+            "{}/v2/mailboxes/{}/ack",
+            mailbox.base_url.trim_end_matches('/'),
+            mailbox.mailbox_id
+        );
+        self.http
+            .post(uri)
+            .header("X-Mailbox-Read-Capability", &mailbox.read_capability)
+            .json(&json!({ "envelopeIds": envelope_ids }))
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    pub fn publish_prekeys(
+        &self,
+        mailbox: &OwnedMailbox,
+        publication: &PrekeyPublication,
+    ) -> Result<(), CoreError> {
+        let uri = format!(
+            "{}/v2/prekeys/{}",
+            mailbox.base_url.trim_end_matches('/'),
+            mailbox.mailbox_id
+        );
+        let one_time: Vec<serde_json::Value> = publication
+            .one_time_prekeys
+            .iter()
+            .map(|prekey| {
+                Ok(json!({
+                    "prekeyId": prekey.prekey_id,
+                    "prekeyJson": serde_json::to_string(prekey)?,
+                }))
+            })
+            .collect::<Result<_, CoreError>>()?;
+        self.http
+            .put(uri)
+            .header("X-Mailbox-Write-Capability", &mailbox.write_capability)
+            .json(&json!({
+                "userId": publication.identity.user_id,
+                "deviceId": publication.identity.device_id,
+                "identityJson": serde_json::to_string(&publication.identity)?,
+                "signedPrekeyJson": serde_json::to_string(&publication.signed_prekey)?,
+                "sequence": publication.signed_prekey.descriptor.sequence,
+                "expiresAt": rfc3339(
+                    publication.signed_prekey.descriptor.expires_at_unix_milliseconds,
+                )?,
+                "oneTimePrekeys": one_time,
+            }))
+            .send()?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Забирает связку предключей устройства. Одноразовый ключ Node отдаёт ровно один раз,
+    /// поэтому возвращённую связку нельзя терять — второй такой не будет.
+    pub fn claim_prekeys(
+        &self,
+        base_url: &str,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<ClaimedPrekeyBundle, CoreError> {
+        let uri = format!(
+            "{}/v2/prekeys/{user_id}/{device_id}/claim",
+            base_url.trim_end_matches('/')
+        );
+        let wire: ClaimedPrekeyWire = self.http.get(uri).send()?.error_for_status()?.json()?;
+        let identity: crate::protocol::WireIdentity = serde_json::from_str(&wire.identity_json)?;
+        let signed_prekey: SignedDevicePrekey = serde_json::from_str(&wire.signed_prekey_json)?;
+        let one_time = wire
+            .one_time_prekey
+            .map(|value| serde_json::from_str::<OneTimePrekeyPublic>(&value.prekey_json))
+            .transpose()?;
+        let publication = PrekeyPublication {
+            identity: identity.clone(),
+            signed_prekey: signed_prekey.clone(),
+            one_time_prekeys: one_time.clone().into_iter().collect(),
+        };
+        if !crate::prekeys::verify_publication(&publication)
+            || wire.user_id != identity.user_id
+            || wire.device_id != identity.device_id
+            || wire.user_id != user_id
+            || wire.device_id != device_id
+        {
+            return Err(CoreError::Crypto(
+                "Node вернул неподписанную связку предключей".to_owned(),
+            ));
+        }
+        Ok(ClaimedPrekeyBundle {
+            user_id: wire.user_id,
+            device_id: wire.device_id,
+            identity,
+            signed_prekey,
+            one_time_prekey: one_time,
+        })
+    }
+
+    pub fn publish_routing(
+        &self,
+        node: &NodeDescriptor,
+        routing: &SignedRoutingDescriptor,
+    ) -> Result<(), CoreError> {
+        let uri = format!(
+            "{}/v2/routing/{}",
+            node.base_url.trim_end_matches('/'),
+            routing.descriptor.user_id
+        );
+        self.put_claim(
+            &uri,
+            json!({
+                "identityPublicKey": routing
+                    .descriptor
+                    .device_list
+                    .document
+                    .devices
+                    .first()
+                    .map(|device| device.identity_public_key.clone())
+                    .unwrap_or_default(),
+                "sequence": routing.descriptor.sequence,
+                "descriptorJson": routing.descriptor_json,
+                "signature": routing.signature,
+                "expiresAt": rfc3339(routing.descriptor.expires_at_unix_milliseconds)?,
+            }),
+        )
+    }
+
+    /// Адрес собеседника. `None` — записи ещё нет: человек не заходил в сеть с этого клиента.
+    pub fn routing(
+        &self,
+        node: &NodeDescriptor,
+        user_id: &str,
+    ) -> Result<Option<SignedRoutingDescriptor>, CoreError> {
+        let uri = format!(
+            "{}/v2/routing/{user_id}",
+            node.base_url.trim_end_matches('/')
+        );
+        let response = self.http.get(uri).send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let wire: RoutingWire = response.error_for_status()?.json()?;
+        let descriptor: crate::routing::RoutingDescriptor =
+            serde_json::from_str(&wire.descriptor_json)?;
+        let signed = SignedRoutingDescriptor {
+            descriptor,
+            descriptor_json: wire.descriptor_json,
+            signature: wire.signature,
+        };
+        if wire.user_id != user_id
+            || wire.sequence != signed.descriptor.sequence
+            || !signed.verify()
+        {
+            return Err(CoreError::Crypto(
+                "Node вернул неподписанный адрес".to_owned(),
+            ));
+        }
+        Ok(Some(signed))
+    }
+
+    pub fn blob_register(
+        &self,
+        base_url: &str,
+        object_id: &str,
+        read_capability: &str,
+        write_capability: &str,
+        expected_size: u64,
+        chunk_size: i32,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), CoreError> {
+        let uri = format!("{}/v2/blobs", base_url.trim_end_matches('/'));
+        checked(
+            self.http
+                .post(uri)
+                .json(&json!({
+                    "objectId": object_id,
+                    "readCapability": read_capability,
+                    "writeCapability": write_capability,
+                    "expectedSize": expected_size,
+                    "chunkSize": chunk_size,
+                    "expiresAt": crate::mailbox::rfc3339(expires_at),
+                }))
+                .send()?,
+        )?;
+        Ok(())
+    }
+
+    pub fn blob_put_chunk(
+        &self,
+        base_url: &str,
+        object_id: &str,
+        index: i32,
+        write_capability: &str,
+        digest: &str,
+        body: Vec<u8>,
+    ) -> Result<(), CoreError> {
+        let uri = format!(
+            "{}/v2/blobs/{object_id}/chunks/{index}",
+            base_url.trim_end_matches('/')
+        );
+        checked(
+            self.http
+                .put(uri)
+                .header("X-Blob-Write-Capability", write_capability)
+                .header("X-Chunk-SHA256", digest)
+                .header("Content-Type", "application/octet-stream")
+                .body(body)
+                .send()?,
+        )?;
+        Ok(())
+    }
+
+    pub fn blob_get_chunk(
+        &self,
+        base_url: &str,
+        object_id: &str,
+        index: i32,
+        read_capability: &str,
+    ) -> Result<Vec<u8>, CoreError> {
+        let uri = format!(
+            "{}/v2/blobs/{object_id}/chunks/{index}",
+            base_url.trim_end_matches('/')
+        );
+        Ok(self
+            .http
+            .get(uri)
+            .header("X-Blob-Read-Capability", read_capability)
+            .send()?
+            .error_for_status()?
+            .bytes()?
+            .to_vec())
+    }
+
     fn put_claim(&self, uri: &str, body: serde_json::Value) -> Result<(), CoreError> {
         self.http.put(uri).json(&body).send()?.error_for_status()?;
         Ok(())
@@ -415,6 +797,7 @@ fn descriptor_canonical(value: &NodeDescriptor) -> Vec<u8> {
     result.extend_from_slice(&value.contact_pow_bits.to_be_bytes());
     result.extend_from_slice(&value.max_envelope_bytes.to_be_bytes());
     result.extend_from_slice(&value.max_mailbox_ttl_hours.to_be_bytes());
+    result.extend_from_slice(&value.max_blob_bytes.to_be_bytes());
     result
 }
 
@@ -438,6 +821,24 @@ fn verify_p256(spki_base64: &str, content: &str, signature_base64: &str, user_id
     result.is_some()
 }
 
+/// Ответ Node вместе с его объяснением. `error_for_status` оставляет от отказа только код,
+/// а Node кладёт в тело причину — пользователю нужна именно она, а не «400 Bad Request».
+fn checked(
+    response: reqwest::blocking::Response,
+) -> Result<reqwest::blocking::Response, CoreError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let body = response.text().unwrap_or_default();
+    let message = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value["message"].as_str().map(str::to_owned))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+    Err(CoreError::Node(message))
+}
+
 fn validate_node_url(url: &str) -> Result<(), CoreError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|_| CoreError::InvalidInput("Некорректный адрес Node".to_owned()))?;
@@ -452,4 +853,67 @@ fn validate_node_url(url: &str) -> Result<(), CoreError> {
 
 pub fn expected_node_for(url: &str) -> Option<&'static str> {
     (url.trim_end_matches('/') == "https://turattext.rplacefree.store").then_some(DEFAULT_NODE_ID)
+}
+
+/// Адрес собственного ящика для фонового ожидания. Отдельная структура нужна затем, чтобы
+/// ждать конверт, не удерживая ядро: в ней нет ничего, кроме того, что требуется одному
+/// GET-запросу.
+#[derive(Debug, Clone)]
+pub struct MailboxWatch {
+    pub base_url: String,
+    pub mailbox_id: String,
+    pub read_capability: String,
+}
+
+impl MailboxWatch {
+    pub fn of(mailbox: &OwnedMailbox) -> Self {
+        Self {
+            base_url: mailbox.base_url.clone(),
+            mailbox_id: mailbox.mailbox_id.clone(),
+            read_capability: mailbox.read_capability.clone(),
+        }
+    }
+}
+
+/// Максимальное окно ожидания: Node ограничивает его своей настройкой, здесь — верхняя
+/// граница, под которую строится таймаут HTTP-клиента.
+pub const MAX_WATCH_SECONDS: u32 = 25;
+
+/// Долгий опрос почтового ящика. У общего клиента таймаут 10 секунд — он рассчитан на
+/// команды пользователя; здесь запрос обязан висеть всё окно ожидания, поэтому клиент свой.
+pub struct MailboxWatcher {
+    http: reqwest::blocking::Client,
+}
+
+impl MailboxWatcher {
+    pub fn new() -> Result<Self, CoreError> {
+        Ok(Self {
+            http: reqwest::blocking::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(MAX_WATCH_SECONDS as u64 + 15))
+                .https_only(false)
+                .user_agent("Turat-Native/3.0")
+                .build()?,
+        })
+    }
+
+    /// Ждёт конверт до `seconds` секунд. `true` — в ящике что-то есть и пора синхронизироваться,
+    /// `false` — окно истекло впустую. Сами конверты забирает ядро: здесь только сигнал.
+    pub fn wait(&self, watch: &MailboxWatch, seconds: u32) -> Result<bool, CoreError> {
+        validate_node_url(&watch.base_url)?;
+        let uri = format!(
+            "{}/v2/mailboxes/{}/envelopes?limit=1&wait={}",
+            watch.base_url.trim_end_matches('/'),
+            watch.mailbox_id,
+            seconds.clamp(1, MAX_WATCH_SECONDS)
+        );
+        let envelopes: Vec<MailboxEnvelope> = self
+            .http
+            .get(uri)
+            .header("X-Mailbox-Read-Capability", &watch.read_capability)
+            .send()?
+            .error_for_status()?
+            .json()?;
+        Ok(!envelopes.is_empty())
+    }
 }

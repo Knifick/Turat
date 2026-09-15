@@ -49,9 +49,13 @@ public sealed partial class MessageTemplateSelector : DataTemplateSelector
 
     public DataTemplate? Outgoing { get; set; }
 
+    /// <summary>Вложение, которое ещё шифруется перед отправкой.</summary>
+    public DataTemplate? Transfer { get; set; }
+
     protected override DataTemplate? SelectTemplateCore(object item) => item switch
     {
         DaySeparator => Day,
+        TransferModel => Transfer,
         MessageModel { Outgoing: true } => Outgoing,
         MessageModel => Incoming,
         _ => null,
@@ -91,32 +95,67 @@ internal static class UiSettings
     /// <summary>Идентификатор темы из <see cref="ThemeCatalog"/>.</summary>
     public static string ThemeId
     {
-        get
+        get => Read("theme", ThemeCatalog.All[0].Id);
+        set => Write(value, FontId);
+    }
+
+    /// <summary>Идентификатор локальной гарнитуры из <see cref="FontCatalog"/>.</summary>
+    public static string FontId
+    {
+        get => Read("font", FontCatalog.Default.Id);
+        set => Write(ThemeId, value);
+    }
+
+    private static string Read(string property, string fallback)
+    {
+        try
         {
-            try
-            {
-                if (!File.Exists(Path)) return ThemeCatalog.All[0].Id;
-                using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path));
-                return document.RootElement.TryGetProperty("theme", out JsonElement value)
-                    ? value.GetString() ?? ThemeCatalog.All[0].Id
-                    : ThemeCatalog.All[0].Id;
-            }
-            catch
-            {
-                return ThemeCatalog.All[0].Id;
-            }
+            if (!File.Exists(Path)) return fallback;
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path));
+            return document.RootElement.TryGetProperty(property, out JsonElement value)
+                ? value.GetString() ?? fallback
+                : fallback;
         }
-        set
+        catch
         {
-            try
-            {
-                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
-                File.WriteAllText(Path, JsonSerializer.Serialize(new { theme = value }));
-            }
-            catch
-            {
-                // Оформление — не критичная настройка: ошибку записи можно проигнорировать.
-            }
+            return fallback;
         }
     }
+
+    private static void Write(string theme, string font)
+    {
+        try
+        {
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
+            File.WriteAllText(Path, JsonSerializer.Serialize(new { theme, font }));
+        }
+        catch
+        {
+            // Оформление — не критичная настройка: ошибку записи можно проигнорировать.
+        }
+    }
+}
+
+/// <summary>Гарнитура интерфейса и её локальный файл в поставке Windows-клиента.</summary>
+public sealed record AppFontChoice(string Id, string Title, string Source)
+{
+    public FontFamily Family { get; } = new(Source);
+}
+
+internal static class FontCatalog
+{
+    public static readonly IReadOnlyList<AppFontChoice> All =
+    [
+        new("System", "Системный", "Segoe UI"),
+        new("Lora", "Lora", "ms-appx:///Assets/Fonts/lora.ttf#Lora"),
+        new("Newsreader", "Newsreader", "ms-appx:///Assets/Fonts/newsreader.ttf#Newsreader"),
+        new("Literata", "Literata", "ms-appx:///Assets/Fonts/literata.ttf#Literata"),
+        new("Ubuntu", "Ubuntu", "ms-appx:///Assets/Fonts/ubuntu.ttf#Ubuntu"),
+        new("GolosText", "Golos Text", "ms-appx:///Assets/Fonts/golos_text.ttf#Golos Text"),
+    ];
+
+    public static AppFontChoice Default => All.First(font => font.Id == "Lora");
+
+    public static AppFontChoice Resolve(string? id) =>
+        All.FirstOrDefault(font => string.Equals(font.Id, id, StringComparison.OrdinalIgnoreCase)) ?? Default;
 }

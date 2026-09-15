@@ -2,9 +2,11 @@ package app.turattext.mobile.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Easing
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animate
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -29,11 +31,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -42,6 +46,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import app.turattext.mobile.model.AppSnapshot
 import app.turattext.mobile.model.CoreJson
+import app.turattext.mobile.model.Message
+import app.turattext.mobile.model.PendingUpload
 import kotlinx.coroutines.launch
 
 /** Единый набор действий над ядром — иначе экранам пришлось бы передавать два десятка лямбд. */
@@ -63,12 +69,18 @@ class AppActions(
     val saveDraft: (String, String) -> Unit,
     val clearHistory: (String) -> Unit,
     val markUnread: (String) -> Unit,
+    /** Отмечает прочитанным диалог, который сейчас перед глазами. */
+    val markRead: (String) -> Unit,
     val search: (String) -> Unit,
     val setPresence: (Boolean) -> Unit,
     val sync: () -> Unit,
     val command: (String, ((Boolean) -> Unit)?) -> Unit,
     val pickAttachment: () -> Unit,
     val pickAvatar: () -> Unit,
+    /** Сохраняет вложение сообщения в выбранный пользователем файл. */
+    val saveAttachment: (Message) -> Unit,
+    /** Прерывает начатую передачу вложения по идентификатору задачи. */
+    val cancelTransfer: (String) -> Unit,
     val export: (String, String, String) -> Unit,
     val importFile: (String, String, Array<String>) -> Unit,
 )
@@ -86,8 +98,12 @@ private sealed interface Overlay {
 fun TuratTextApp(
     state: AppSnapshot,
     busy: Boolean,
+    uploads: List<PendingUpload>,
+    downloads: Map<String, MediaTransfer>,
     theme: AppTheme,
+    font: AppFont,
     onThemeChange: (AppTheme) -> Unit,
+    onFontChange: (AppFont) -> Unit,
     actions: AppActions,
 ) {
     val colors = Telegram.colors
@@ -125,7 +141,9 @@ fun TuratTextApp(
                     drawerContainerColor = Color.Transparent,
                     drawerContentColor = colors.text,
                     drawerShape = GlassShape.Sheet,
-                    modifier = Modifier.glass(colors, GlassShape.Sheet, raised = true),
+                    // Стандартная максимальная ширина Material drawer — 360 dp.
+                    // 252 dp делает служебную карточку ровно на 30% уже.
+                    modifier = Modifier.width(252.dp).glass(colors, GlassShape.Sheet, raised = true),
                 ) {
                     DrawerContent(
                         profile = state.profile,
@@ -151,23 +169,39 @@ fun TuratTextApp(
 
                 // Диалог лежит поверх списка и ездит по горизонтали: и жест, и открытие с
                 // закрытием двигают одно и то же смещение, поэтому переход всегда непрерывен.
-                val pane = remember { Animatable(0f) }
-                LaunchedEffect(contactId, width, wide) {
+                var paneOffset by remember { mutableFloatStateOf(0f) }
+                var paneDragging by remember { mutableStateOf(false) }
+
+                suspend fun animatePaneTo(target: Float, duration: Int, easing: Easing) {
+                    animate(
+                        initialValue = paneOffset,
+                        targetValue = target,
+                        animationSpec = tween(durationMillis = duration, easing = easing),
+                    ) { value, _ -> paneOffset = value.coerceIn(0f, width) }
+                    // Фиксируем якорь явно: после отпускания жест никогда не должен остаться
+                    // между открытым и закрытым состояниями из-за округления или отмены кадра.
+                    paneOffset = target.coerceIn(0f, width)
+                }
+
+                LaunchedEffect(contactId, width, wide, paneDragging) {
                     when {
-                        wide -> pane.snapTo(0f)
-                        contactId == null -> pane.snapTo(width)
-                        pane.value != 0f -> pane.animateTo(0f, tween(260, easing = FastOutSlowInEasing))
+                        wide -> paneOffset = 0f
+                        contactId == null -> paneOffset = width
+                        paneDragging -> Unit
+                        paneOffset != 0f -> animatePaneTo(0f, 260, FastOutSlowInEasing)
                     }
                 }
 
                 val closeConversation: () -> Unit = {
                     scope.launch {
-                        pane.animateTo(width, tween(220, easing = FastOutLinearInEasing))
+                        animatePaneTo(width, 220, FastOutLinearInEasing)
                         actions.selectContact(null)
                     }
                 }
                 val drag = rememberDraggableState { delta ->
-                    scope.launch { pane.snapTo((pane.value + delta).coerceIn(0f, width)) }
+                    // Обновляем позицию синхронно с пальцем. Раньше здесь создавалась корутина на
+                    // каждый delta, и запоздавший snapTo мог перезаписать финальную анимацию.
+                    paneOffset = (paneOffset + delta).coerceIn(0f, width)
                 }
 
                 val chatList: @Composable (Modifier) -> Unit = { modifier ->
@@ -184,10 +218,17 @@ fun TuratTextApp(
                         modifier = modifier,
                     )
                 }
+                // Положение в ленте живёт выше самой панели: панель существует только пока
+                // диалог открыт, и если она на миг покинет композицию, прокрутка не должна
+                // прыгать к началу переписки.
+                val conversationScroll = rememberLazyListState()
                 val conversation: @Composable (Modifier, () -> Unit) -> Unit = { modifier, onBack ->
                     ConversationPane(
+                        listState = conversationScroll,
                         state = state,
                         actions = actions,
+                        uploads = uploads,
+                        downloads = downloads,
                         showBack = !wide,
                         onBack = onBack,
                         onOpenProfile = { overlay = Overlay.Profile },
@@ -205,11 +246,12 @@ fun TuratTextApp(
                 } else {
                     val open = contactId != null
                     // 0 — диалог закрывает экран целиком, 1 — он полностью ушёл за правый край.
-                    val progress = if (!open || width <= 0f) 1f else (pane.value / width).coerceIn(0f, 1f)
+                    val progress = if (!open || width <= 0f) 1f else (paneOffset / width).coerceIn(0f, 1f)
                     Box(Modifier.fillMaxSize()) {
                         chatList(
                             Modifier.fillMaxSize()
                                 .graphicsLayer { translationX = -ListParallax * width * (1f - progress) }
+                                .blur((ChatListBlurRadius * (1f - progress)).dp)
                                 .blockTouches(open),
                         )
                         if (open) {
@@ -219,18 +261,23 @@ fun TuratTextApp(
                             )
                             conversation(
                                 Modifier.fillMaxSize()
-                                    .graphicsLayer { translationX = pane.value }
+                                    .graphicsLayer { translationX = paneOffset }
                                     .draggable(
                                         state = drag,
                                         orientation = Orientation.Horizontal,
+                                        onDragStarted = { paneDragging = true },
                                         onDragStopped = { velocity ->
-                                            val back = pane.value > width * BackDistanceFraction ||
+                                            val back = paneOffset >= width * BackDistanceFraction ||
                                                 velocity > BackVelocity
-                                            if (back) {
-                                                pane.animateTo(width, tween(200, easing = FastOutLinearInEasing))
-                                                actions.selectContact(null)
-                                            } else {
-                                                pane.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+                                            try {
+                                                if (back) {
+                                                    animatePaneTo(width, 200, FastOutLinearInEasing)
+                                                    actions.selectContact(null)
+                                                } else {
+                                                    animatePaneTo(0f, 220, FastOutSlowInEasing)
+                                                }
+                                            } finally {
+                                                paneDragging = false
                                             }
                                         },
                                     ),
@@ -259,8 +306,10 @@ fun TuratTextApp(
             SettingsScreen(
                 state = state,
                 theme = theme,
+                font = font,
                 actions = actions,
                 onThemeChange = onThemeChange,
+                onFontChange = onFontChange,
                 onBack = { overlay = Overlay.None },
             )
         }
@@ -304,9 +353,10 @@ fun TuratTextApp(
 /** Насколько список подтягивается из-за левого края, пока диалог уезжает вправо. */
 private const val ListParallax = 0.3f
 private const val ScrimAlpha = 0.32f
+private const val ChatListBlurRadius = 24f
 
-/** Порог возврата: треть ширины либо заметный бросок вправо. */
-private const val BackDistanceFraction = 0.3f
+/** Порог возврата: половина ширины либо заметный бросок вправо. */
+private const val BackDistanceFraction = 0.5f
 private const val BackVelocity = 900f
 
 /**

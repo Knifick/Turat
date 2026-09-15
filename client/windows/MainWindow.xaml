@@ -5,7 +5,8 @@
     xmlns:local="using:TuratText.Windows"
     Title="Turat">
 
-    <Grid x:Name="Root" Background="{ThemeResource TgWindow}" Loaded="Root_Loaded">
+    <Grid x:Name="Root" Background="{ThemeResource TgWindow}" Loaded="Root_Loaded"
+          PreviewKeyDown="Root_PreviewKeyDown">
         <Grid.Resources>
 
             <!-- Строка списка чатов: аватар, имя, время, превью, счётчик. -->
@@ -119,11 +120,10 @@
             </DataTemplate>
 
             <DataTemplate x:Key="IncomingMessageTemplate" x:DataType="local:MessageModel">
-                <Grid Margin="{x:Bind RowMargin}" HorizontalAlignment="Stretch">
+                <Grid Margin="{x:Bind RowMargin}" HorizontalAlignment="Stretch" Background="Transparent">
                     <Border HorizontalAlignment="Left" MaxWidth="560" Padding="12,7,12,7"
                             CornerRadius="{x:Bind BubbleCorners}" Background="{ThemeResource TgBubbleIn}"
-                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
-                            ContextRequested="Message_ContextRequested">
+                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                         <StackPanel>
                             <TextBlock Text="{x:Bind ForwardLabel}" Visibility="{x:Bind ForwardVisibility}"
                                        Foreground="{ThemeResource TgAccent}" FontSize="12" FontWeight="SemiBold"
@@ -140,18 +140,47 @@
                                     </StackPanel>
                                 </Grid>
                             </Border>
-                            <Grid Visibility="{x:Bind AttachmentVisibility}" ColumnDefinitions="Auto,*"
-                                  ColumnSpacing="10" Margin="0,2,0,2">
-                                <Border Width="40" Height="40" CornerRadius="20" Background="{ThemeResource TgQuoteIn}">
-                                    <FontIcon Glyph="&#xE7C3;" FontSize="17" Foreground="{ThemeResource TgAccent}" />
-                                </Border>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                    <TextBlock Text="{x:Bind Attachment.FileName}" Foreground="{ThemeResource TgBubbleInText}"
-                                               FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Text="{x:Bind Attachment.SizeLabel}" Foreground="{ThemeResource TgMetaIn}"
-                                               FontSize="12" />
-                                </StackPanel>
-                            </Grid>
+                            <StackPanel Visibility="{x:Bind AttachmentVisibility}" Margin="0,2,0,2" Spacing="4">
+                                <Grid Visibility="{x:Bind MediaVisibility}" Width="{x:Bind PreviewWidth}"
+                                      Height="{x:Bind PreviewHeight}" CornerRadius="12"
+                                      Background="{ThemeResource TgQuoteIn}" HorizontalAlignment="Left">
+                                    <Image Source="{x:Bind Preview, Mode=OneWay}" Stretch="UniformToFill" />
+                                    <ProgressRing IsActive="True" Width="34" Height="34"
+                                                  Foreground="{ThemeResource TgAccent}"
+                                                  Visibility="{x:Bind PlaceholderVisibility, Mode=OneWay}" />
+                                    <Border Visibility="{x:Bind PlayVisibility}" Width="52" Height="52"
+                                            CornerRadius="26" Background="#66000000" BorderThickness="1"
+                                            BorderBrush="#40FFFFFF" HorizontalAlignment="Center"
+                                            VerticalAlignment="Center">
+                                        <FontIcon Glyph="&#xE768;" FontFamily="Segoe MDL2 Assets" FontSize="20"
+                                                  Foreground="White" />
+                                    </Border>
+                                    <Border Background="#66000000" CornerRadius="7" Padding="6,2" Margin="7"
+                                            HorizontalAlignment="Left" VerticalAlignment="Top">
+                                        <TextBlock Text="{x:Bind MediaBadge}" Foreground="White" FontSize="11"
+                                                   FontWeight="SemiBold" />
+                                    </Border>
+                                    <Button Style="{StaticResource TgIconButton}" Click="OpenMedia_Click"
+                                            Background="Transparent" HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch" ToolTipService.ToolTip="Открыть" />
+                                </Grid>
+                                <Grid Visibility="{x:Bind FileVisibility}" ColumnDefinitions="Auto,*,Auto"
+                                      ColumnSpacing="10">
+                                    <Border Width="40" Height="40" CornerRadius="20" Background="{ThemeResource TgQuoteIn}">
+                                        <SymbolIcon Symbol="Document" Foreground="{ThemeResource TgAccent}" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind Attachment.FileName}" Foreground="{ThemeResource TgBubbleInText}"
+                                                   FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{x:Bind Attachment.SizeLabel}" Foreground="{ThemeResource TgMetaIn}"
+                                                   FontSize="12" />
+                                    </StackPanel>
+                                    <Button Grid.Column="2" Style="{StaticResource TgIconButton}"
+                                            Click="SaveAttachment_Click" ToolTipService.ToolTip="Сохранить как…">
+                                        <SymbolIcon Symbol="Save" />
+                                    </Button>
+                                </Grid>
+                            </StackPanel>
                             <Grid ColumnDefinitions="*,Auto">
                                 <TextBlock Text="{x:Bind DisplayText}" Visibility="{x:Bind TextVisibility}"
                                            Foreground="{ThemeResource TgBubbleInText}" FontSize="14"
@@ -171,11 +200,10 @@
             </DataTemplate>
 
             <DataTemplate x:Key="OutgoingMessageTemplate" x:DataType="local:MessageModel">
-                <Grid Margin="{x:Bind RowMargin}" HorizontalAlignment="Stretch">
+                <Grid Margin="{x:Bind RowMargin}" HorizontalAlignment="Stretch" Background="Transparent">
                     <Border HorizontalAlignment="Right" MaxWidth="560" Padding="12,7,12,7"
                             CornerRadius="{x:Bind BubbleCorners}" Background="{ThemeResource TgBubbleOut}"
-                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
-                            ContextRequested="Message_ContextRequested">
+                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                         <StackPanel>
                             <TextBlock Text="{x:Bind ForwardLabel}" Visibility="{x:Bind ForwardVisibility}"
                                        Foreground="{ThemeResource TgMetaOut}" FontSize="12" FontWeight="SemiBold"
@@ -192,18 +220,47 @@
                                     </StackPanel>
                                 </Grid>
                             </Border>
-                            <Grid Visibility="{x:Bind AttachmentVisibility}" ColumnDefinitions="Auto,*"
-                                  ColumnSpacing="10" Margin="0,2,0,2">
-                                <Border Width="40" Height="40" CornerRadius="20" Background="{ThemeResource TgQuoteOut}">
-                                    <FontIcon Glyph="&#xE7C3;" FontSize="17" Foreground="{ThemeResource TgBubbleOutText}" />
-                                </Border>
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                    <TextBlock Text="{x:Bind Attachment.FileName}" Foreground="{ThemeResource TgBubbleOutText}"
-                                               FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-                                    <TextBlock Text="{x:Bind Attachment.SizeLabel}" Foreground="{ThemeResource TgMetaOut}"
-                                               FontSize="12" />
-                                </StackPanel>
-                            </Grid>
+                            <StackPanel Visibility="{x:Bind AttachmentVisibility}" Margin="0,2,0,2" Spacing="4">
+                                <Grid Visibility="{x:Bind MediaVisibility}" Width="{x:Bind PreviewWidth}"
+                                      Height="{x:Bind PreviewHeight}" CornerRadius="12"
+                                      Background="{ThemeResource TgQuoteOut}" HorizontalAlignment="Left">
+                                    <Image Source="{x:Bind Preview, Mode=OneWay}" Stretch="UniformToFill" />
+                                    <ProgressRing IsActive="True" Width="34" Height="34"
+                                                  Foreground="{ThemeResource TgAccent}"
+                                                  Visibility="{x:Bind PlaceholderVisibility, Mode=OneWay}" />
+                                    <Border Visibility="{x:Bind PlayVisibility}" Width="52" Height="52"
+                                            CornerRadius="26" Background="#66000000" BorderThickness="1"
+                                            BorderBrush="#40FFFFFF" HorizontalAlignment="Center"
+                                            VerticalAlignment="Center">
+                                        <FontIcon Glyph="&#xE768;" FontFamily="Segoe MDL2 Assets" FontSize="20"
+                                                  Foreground="White" />
+                                    </Border>
+                                    <Border Background="#66000000" CornerRadius="7" Padding="6,2" Margin="7"
+                                            HorizontalAlignment="Left" VerticalAlignment="Top">
+                                        <TextBlock Text="{x:Bind MediaBadge}" Foreground="White" FontSize="11"
+                                                   FontWeight="SemiBold" />
+                                    </Border>
+                                    <Button Style="{StaticResource TgIconButton}" Click="OpenMedia_Click"
+                                            Background="Transparent" HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch" ToolTipService.ToolTip="Открыть" />
+                                </Grid>
+                                <Grid Visibility="{x:Bind FileVisibility}" ColumnDefinitions="Auto,*,Auto"
+                                      ColumnSpacing="10">
+                                    <Border Width="40" Height="40" CornerRadius="20" Background="{ThemeResource TgQuoteOut}">
+                                        <SymbolIcon Symbol="Document" Foreground="{ThemeResource TgBubbleOutText}" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{x:Bind Attachment.FileName}" Foreground="{ThemeResource TgBubbleOutText}"
+                                                   FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Text="{x:Bind Attachment.SizeLabel}" Foreground="{ThemeResource TgMetaOut}"
+                                                   FontSize="12" />
+                                    </StackPanel>
+                                    <Button Grid.Column="2" Style="{StaticResource TgIconButton}"
+                                            Click="SaveAttachment_Click" ToolTipService.ToolTip="Сохранить как…">
+                                        <SymbolIcon Symbol="Save" />
+                                    </Button>
+                                </Grid>
+                            </StackPanel>
                             <Grid ColumnDefinitions="*,Auto">
                                 <TextBlock Text="{x:Bind DisplayText}" Visibility="{x:Bind TextVisibility}"
                                            Foreground="{ThemeResource TgBubbleOutText}" FontSize="14"
@@ -248,10 +305,54 @@
                 </Grid>
             </DataTemplate>
 
+            <!-- Карточка шрифта показывает и латиницу, и кириллицу выбранной гарнитурой. -->
+            <DataTemplate x:Key="FontCardTemplate" x:DataType="local:AppFontChoice">
+                <Border Width="196" Height="58" CornerRadius="16" Padding="13,10"
+                        Background="{ThemeResource TgElevated}" BorderBrush="{ThemeResource TgGlassRim}"
+                        BorderThickness="1">
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBlock Text="{x:Bind Title}" FontFamily="{x:Bind Family}" FontSize="16"
+                                   FontWeight="SemiBold" Foreground="{ThemeResource TgText}"
+                                   VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1" Text="Aa" FontFamily="{x:Bind Family}" FontSize="15"
+                                   TextAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{ThemeResource TgAccent}" />
+                    </Grid>
+                </Border>
+            </DataTemplate>
+
+            <!-- Файл, который ещё шифруется: пузырь с прогрессом стоит там же, где встанет сообщение. -->
+            <DataTemplate x:Key="TransferTemplate" x:DataType="local:TransferModel">
+                <Grid Margin="0,8,0,0" HorizontalAlignment="Stretch" Background="Transparent">
+                    <Border HorizontalAlignment="Right" MaxWidth="560" MinWidth="280" Padding="12,9,12,9"
+                            CornerRadius="14,14,4,14" Background="{ThemeResource TgBubbleOut}"
+                            BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10" RowDefinitions="Auto,Auto,Auto">
+                            <TextBlock Text="{x:Bind FileName}" Foreground="{ThemeResource TgBubbleOutText}"
+                                       FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <Button Grid.Column="1" Grid.RowSpan="2" Style="{StaticResource TgIconButton}"
+                                    Click="CancelTransfer_Click" VerticalAlignment="Center"
+                                    ToolTipService.ToolTip="Отменить передачу">
+                                <SymbolIcon Symbol="Cancel" />
+                            </Button>
+                            <ProgressBar Grid.Row="1" Value="{x:Bind Percent, Mode=OneWay}" Maximum="100"
+                                         Margin="0,6,0,4" Foreground="{ThemeResource TgBubbleOutText}" />
+                            <TextBlock Grid.Row="2" Text="{x:Bind SizeLabel, Mode=OneWay}"
+                                       Foreground="{ThemeResource TgMetaOut}" FontSize="12" />
+                            <TextBlock Grid.Row="2" Grid.ColumnSpan="2" Text="{x:Bind Error, Mode=OneWay}"
+                                       Visibility="{x:Bind ErrorVisibility, Mode=OneWay}"
+                                       Foreground="{ThemeResource TgDanger}" FontSize="12"
+                                       HorizontalAlignment="Right" />
+                        </Grid>
+                    </Border>
+                </Grid>
+            </DataTemplate>
+
             <local:MessageTemplateSelector x:Key="MessageTemplateSelector"
                                            Day="{StaticResource DaySeparatorTemplate}"
                                            Incoming="{StaticResource IncomingMessageTemplate}"
-                                           Outgoing="{StaticResource OutgoingMessageTemplate}" />
+                                           Outgoing="{StaticResource OutgoingMessageTemplate}"
+                                           Transfer="{StaticResource TransferTemplate}" />
         </Grid.Resources>
 
         <Grid.RowDefinitions>
@@ -290,14 +391,14 @@
                 <StackPanel Grid.Row="2" Spacing="4" Margin="0,0,0,10" HorizontalAlignment="Center">
                     <Button Style="{StaticResource TgIconButton}" Click="Sync_Click"
                             ToolTipService.ToolTip="Обновить сейчас (клиент синхронизируется сам)">
-                        <FontIcon Glyph="&#xE72C;" FontSize="16" />
+                        <SymbolIcon Symbol="Refresh" />
                     </Button>
                     <Button x:Name="ThemeButton" Style="{StaticResource TgIconButton}" Click="Theme_Click"
                             ToolTipService.ToolTip="Сменить тему">
-                        <FontIcon x:Name="ThemeIcon" Glyph="&#xE706;" FontSize="16" />
+                        <PathIcon Data="M11.1,2.1 C6,2.8 2,7.2 2,12.5 C2,18.3 6.7,23 12.5,23 C17.8,23 22.2,19.1 22.9,14 C21.1,15.6 18.8,16.5 16.3,16.5 C11.4,16.5 7.5,12.6 7.5,7.7 C7.5,5.5 8.3,3.6 11.1,2.1 Z" />
                     </Button>
                     <Button Style="{StaticResource TgIconButton}" Click="Settings_Click" ToolTipService.ToolTip="Настройки">
-                        <FontIcon Glyph="&#xE713;" FontSize="16" />
+                        <SymbolIcon Symbol="Setting" />
                     </Button>
                 </StackPanel>
             </Grid>
@@ -309,8 +410,8 @@
                     <Border CornerRadius="18" Background="{ThemeResource TgField}" Height="36" Padding="12,0"
                             BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
                         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                            <FontIcon Glyph="&#xE721;" FontSize="14" Foreground="{ThemeResource TgHint}"
-                                      VerticalAlignment="Center" />
+                            <SymbolIcon Symbol="Find" Foreground="{ThemeResource TgHint}"
+                                        VerticalAlignment="Center" />
                             <TextBox x:Name="SearchInput" Grid.Column="1" PlaceholderText="Поиск"
                                      BorderThickness="0" Background="Transparent" Padding="0,4,0,4"
                                      Foreground="{ThemeResource TgText}" TextChanged="SearchInput_TextChanged"
@@ -328,7 +429,7 @@
                             </TextBox>
                             <Button Grid.Column="2" x:Name="ClearSearchButton" Style="{StaticResource TgIconButton}"
                                     Padding="4" Visibility="Collapsed" Click="ClearSearch_Click">
-                                <FontIcon Glyph="&#xE711;" FontSize="11" />
+                                <SymbolIcon Symbol="Clear" />
                             </Button>
                         </Grid>
                     </Border>
@@ -347,14 +448,14 @@
                     <Button Style="{StaticResource TgAccentCircle}" HorizontalAlignment="Right"
                             VerticalAlignment="Bottom" Margin="0,0,18,18" Click="NewContact_Click"
                             ToolTipService.ToolTip="Новый диалог">
-                        <FontIcon Glyph="&#xE70F;" FontSize="17" />
+                        <SymbolIcon Symbol="Edit" />
                     </Button>
                 </Grid>
             </Grid>
 
             <!-- Диалог -->
             <Grid Grid.Column="2" Background="{ThemeResource TgWallpaper}"
-                  RowDefinitions="Auto,Auto,*,Auto,Auto"
+                  RowDefinitions="Auto,Auto,*,Auto,Auto,Auto"
                   CornerRadius="20" BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}">
 
                 <Grid x:Name="ConversationHeader" Height="60" Padding="14,0" Background="{ThemeResource TgPanel}"
@@ -385,7 +486,7 @@
                     </StackPanel>
                     <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="2">
                         <Button Style="{StaticResource TgIconButton}" Click="ChatMenu_Click" ToolTipService.ToolTip="Ещё">
-                            <FontIcon Glyph="&#xE712;" FontSize="16" />
+                            <SymbolIcon Symbol="More" />
                         </Button>
                     </StackPanel>
                 </Grid>
@@ -394,29 +495,29 @@
                       CornerRadius="20,20,0,0"
                       ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto" Visibility="Collapsed">
                     <Button Style="{StaticResource TgIconButton}" Click="ClearSelection_Click">
-                        <FontIcon Glyph="&#xE711;" FontSize="15" />
+                        <SymbolIcon Symbol="ClearSelection" />
                     </Button>
                     <TextBlock x:Name="SelectionCount" Grid.Column="1" VerticalAlignment="Center" Margin="10,0"
                                FontWeight="SemiBold" Foreground="{ThemeResource TgText}" />
                     <Button Grid.Column="2" Style="{StaticResource TgIconButton}" Click="ReactSelected_Click"
                             ToolTipService.ToolTip="Реакция">
-                        <FontIcon Glyph="&#xE76E;" FontSize="15" />
+                        <SymbolIcon Symbol="Like" />
                     </Button>
                     <Button Grid.Column="3" Style="{StaticResource TgIconButton}" Click="ForwardSelected_Click"
                             ToolTipService.ToolTip="Переслать">
-                        <FontIcon Glyph="&#xE72D;" FontSize="15" />
+                        <SymbolIcon Symbol="Forward" />
                     </Button>
                     <Button Grid.Column="4" Style="{StaticResource TgIconButton}" Click="Copy_Click"
                             ToolTipService.ToolTip="Копировать">
-                        <FontIcon Glyph="&#xE8C8;" FontSize="15" />
+                        <SymbolIcon Symbol="Copy" />
                     </Button>
                     <Button x:Name="EditSelectedButton" Grid.Column="5" Style="{StaticResource TgIconButton}"
                             Click="EditSelected_Click" ToolTipService.ToolTip="Изменить">
-                        <FontIcon Glyph="&#xE70F;" FontSize="15" />
+                        <SymbolIcon Symbol="Edit" />
                     </Button>
                     <Button Grid.Column="6" Style="{StaticResource TgIconButton}" Click="DeleteSelected_Click"
                             ToolTipService.ToolTip="Удалить">
-                        <FontIcon Glyph="&#xE74D;" FontSize="15" Foreground="{ThemeResource TgDanger}" />
+                        <SymbolIcon Symbol="Delete" Foreground="{ThemeResource TgDanger}" />
                     </Button>
                 </Grid>
 
@@ -429,18 +530,36 @@
                     </Border>
                 </Grid>
 
-                <ListView x:Name="MessagesList" Grid.Row="2" Padding="10,4,10,10" SelectionMode="Extended"
+                <ListView x:Name="MessagesList" Grid.Row="2" Padding="10,4,10,10" SelectionMode="None"
                           ItemContainerStyle="{StaticResource TgMessageItem}"
                           ItemTemplateSelector="{StaticResource MessageTemplateSelector}"
                           SelectionChanged="MessagesList_SelectionChanged"
                           ContainerContentChanging="MessagesList_ContainerContentChanging"
                           Visibility="Collapsed" />
 
-                <Border x:Name="ComposerBanner" Grid.Row="3" Background="{ThemeResource TgPanel}" Padding="14,6"
+                <Border x:Name="SavePanel" Grid.Row="3" Background="{ThemeResource TgPanel}" Padding="14,7"
+                        Visibility="Collapsed">
+                    <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                        <SymbolIcon Symbol="Download" Foreground="{ThemeResource TgAccent}"
+                                    VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="1">
+                            <TextBlock x:Name="SaveTitle" Foreground="{ThemeResource TgText}" FontSize="12"
+                                       FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <ProgressBar x:Name="SaveProgress" Maximum="100" Margin="0,4,0,3" />
+                            <TextBlock x:Name="SaveDetail" Foreground="{ThemeResource TgHint}" FontSize="11" />
+                        </StackPanel>
+                        <Button Grid.Column="2" Style="{StaticResource TgIconButton}" Click="CancelSave_Click"
+                                ToolTipService.ToolTip="Отменить сохранение">
+                            <SymbolIcon Symbol="Cancel" />
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <Border x:Name="ComposerBanner" Grid.Row="4" Background="{ThemeResource TgPanel}" Padding="14,6"
                         Visibility="Collapsed">
                     <Grid ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="9">
-                        <FontIcon x:Name="BannerIcon" Glyph="&#xE70F;" FontSize="14" Foreground="{ThemeResource TgAccent}"
-                                  VerticalAlignment="Center" />
+                        <SymbolIcon x:Name="BannerIcon" Symbol="Edit" Foreground="{ThemeResource TgAccent}"
+                                    VerticalAlignment="Center" />
                         <Rectangle Grid.Column="1" Width="2" Fill="{ThemeResource TgAccent}" />
                         <StackPanel Grid.Column="2" VerticalAlignment="Center">
                             <TextBlock x:Name="BannerTitle" Foreground="{ThemeResource TgAccent}" FontSize="12"
@@ -449,18 +568,18 @@
                                        TextTrimming="CharacterEllipsis" MaxLines="1" />
                         </StackPanel>
                         <Button Grid.Column="3" Style="{StaticResource TgIconButton}" Click="CancelBanner_Click">
-                            <FontIcon Glyph="&#xE711;" FontSize="12" />
+                            <SymbolIcon Symbol="Clear" />
                         </Button>
                     </Grid>
                 </Border>
 
-                <Grid x:Name="Composer" Grid.Row="4" Padding="8" Margin="10,0,10,10"
+                <Grid x:Name="Composer" Grid.Row="5" Padding="8" Margin="10,0,10,10"
                       Background="{ThemeResource TgPanel}" CornerRadius="24"
                       BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
                       ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Visibility="Collapsed">
                     <Button Style="{StaticResource TgIconButton}" Click="Attach_Click" VerticalAlignment="Bottom"
                             ToolTipService.ToolTip="Прикрепить файл">
-                        <FontIcon Glyph="&#xE723;" FontSize="16" />
+                        <SymbolIcon Symbol="Attach" />
                     </Button>
                     <TextBox x:Name="ComposerInput" Grid.Column="1"
                              PlaceholderText="Отправить сообщение"
@@ -482,11 +601,11 @@
                     <Button x:Name="SendButton" Grid.Column="2" Style="{StaticResource TgAccentCircle}" Width="40"
                             Height="40" CornerRadius="20" Click="Send_Click" IsEnabled="False" VerticalAlignment="Bottom"
                             ToolTipService.ToolTip="Отправить (Enter)">
-                        <FontIcon Glyph="&#xE724;" FontSize="15" />
+                        <SymbolIcon Symbol="Send" />
                     </Button>
                 </Grid>
 
-                <Grid x:Name="PendingBar" Grid.Row="4" Background="{ThemeResource TgPanel}" Padding="12"
+                <Grid x:Name="PendingBar" Grid.Row="5" Background="{ThemeResource TgPanel}" Padding="12"
                       Margin="10,0,10,10" CornerRadius="24"
                       BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
                       ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8" Visibility="Collapsed">
@@ -501,101 +620,196 @@
             </Grid>
         </Grid>
 
+        <!--
+            Просмотр вложения. Картинка масштабируется в ScrollViewer, видео играет из
+            зашифрованного файла потоково: MediaPlayerElement получает поток, который
+            расшифровывает только запрошенные куски.
+        -->
+        <Grid x:Name="MediaViewer" Grid.Row="1" Background="{ThemeResource TgOverlay}" Visibility="Collapsed"
+              RowDefinitions="Auto,*">
+            <Grid Padding="12,8" ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
+                <Button Style="{StaticResource TgIconButton}" Click="CloseMedia_Click"
+                        ToolTipService.ToolTip="Закрыть (Esc)">
+                    <SymbolIcon Symbol="Back" />
+                </Button>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock x:Name="MediaTitle" Foreground="{ThemeResource TgText}" FontSize="14"
+                               FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="MediaSubtitle" Foreground="{ThemeResource TgHint}" FontSize="12" />
+                </StackPanel>
+                <Button Grid.Column="2" Style="{StaticResource TgIconButton}" Click="SaveViewedMedia_Click"
+                        ToolTipService.ToolTip="Сохранить как…">
+                    <SymbolIcon Symbol="Save" />
+                </Button>
+                <Button Grid.Column="3" Style="{StaticResource TgIconButton}" Click="CloseMedia_Click">
+                    <SymbolIcon Symbol="Clear" />
+                </Button>
+            </Grid>
+            <ScrollViewer x:Name="MediaImageScroll" Grid.Row="1" ZoomMode="Enabled" MinZoomFactor="1"
+                          MaxZoomFactor="8" HorizontalScrollMode="Auto" VerticalScrollMode="Auto"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                          HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                          SizeChanged="MediaImageScroll_SizeChanged" Padding="16"
+                          Visibility="Collapsed">
+                <Image x:Name="MediaImage" Stretch="Uniform" />
+            </ScrollViewer>
+            <MediaPlayerElement x:Name="MediaPlayer" Grid.Row="1" AreTransportControlsEnabled="True"
+                                Margin="16" Visibility="Collapsed" />
+            <ProgressRing x:Name="MediaBusy" Grid.Row="1" IsActive="True" Width="44" Height="44"
+                          Foreground="{ThemeResource TgAccent}" Visibility="Collapsed" />
+            <TextBlock x:Name="MediaError" Grid.Row="1" Foreground="{ThemeResource TgDanger}" FontSize="14"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
+        </Grid>
+
         <!-- Полноэкранные разделы поверх окна: настройки и профиль собеседника. -->
         <Grid x:Name="SettingsPage" Grid.Row="1" Background="{ThemeResource TgOverlay}" Visibility="Collapsed"
-              RowDefinitions="Auto,*">
+              RowDefinitions="Auto,Auto,*">
             <Grid Height="56" Padding="10,0" Background="{ThemeResource TgPanel}" ColumnDefinitions="Auto,*"
                   ColumnSpacing="8">
                 <Button Style="{StaticResource TgIconButton}" Click="CloseSettings_Click">
-                    <FontIcon Glyph="&#xE72B;" FontSize="15" />
+                    <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE72B;" FontSize="15" />
                 </Button>
                 <TextBlock Grid.Column="1" Text="Настройки" FontSize="17" FontWeight="SemiBold"
                            VerticalAlignment="Center" Foreground="{ThemeResource TgText}" />
             </Grid>
-            <ScrollViewer Grid.Row="1">
-                <StackPanel MaxWidth="620" HorizontalAlignment="Center" Padding="20,16,20,32" Spacing="4">
-                    <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,0,0,10">
-                        <Button Style="{StaticResource TgIconButton}" Padding="0" Click="PickAvatar_Click"
-                                ToolTipService.ToolTip="Сменить фото">
-                            <Grid Width="86" Height="86">
-                                <Border CornerRadius="43" Background="{ThemeResource TgAccent}">
-                                    <Grid>
-                                        <TextBlock x:Name="SettingsInitials" FontSize="28" FontWeight="SemiBold"
-                                                   Foreground="{ThemeResource TgOnAccent}" HorizontalAlignment="Center"
-                                                   VerticalAlignment="Center" />
-                                        <Image x:Name="SettingsAvatar" Stretch="UniformToFill" />
-                                    </Grid>
-                                </Border>
-                                <Border Width="28" Height="28" CornerRadius="14" Background="{ThemeResource TgAccent}"
-                                        HorizontalAlignment="Right" VerticalAlignment="Bottom">
-                                    <FontIcon Glyph="&#xE722;" FontSize="12" Foreground="{ThemeResource TgOnAccent}" />
-                                </Border>
-                            </Grid>
-                        </Button>
-                        <StackPanel VerticalAlignment="Center">
-                            <TextBlock x:Name="SettingsName" FontSize="19" FontWeight="SemiBold"
-                                       Foreground="{ThemeResource TgText}" />
-                            <TextBlock x:Name="SettingsState" Foreground="{ThemeResource TgHint}" FontSize="13" />
-                            <TextBlock x:Name="MyUserId" Foreground="{ThemeResource TgHint}" FontSize="11"
-                                       FontFamily="Consolas" TextWrapping="Wrap" Margin="0,4,0,0" />
+            <!-- Категории закреплены над прокруткой, чтобы между ними можно было переключаться
+                 из любой точки раздела. -->
+            <Border Grid.Row="1" MaxWidth="660" HorizontalAlignment="Stretch" CornerRadius="18"
+                    Background="{ThemeResource TgElevated}" BorderBrush="{ThemeResource TgGlassRim}"
+                    BorderThickness="1" Padding="5" Margin="20,12,20,0">
+                <Grid ColumnDefinitions="*,*,*,*" ColumnSpacing="4">
+                    <Button x:Name="ProfileCategoryButton" Tag="profile" Click="SettingsCategory_Click"
+                            Background="{ThemeResource TgAccentSoft}" Foreground="{ThemeResource TgText}"
+                            BorderThickness="0" CornerRadius="13" Padding="8,10">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE77B;" FontSize="14" />
+                            <TextBlock Text="Профиль" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="AppearanceCategoryButton" Grid.Column="1" Tag="appearance"
+                            Click="SettingsCategory_Click" Background="Transparent"
+                            Foreground="{ThemeResource TgHint}" BorderThickness="0" CornerRadius="13" Padding="8,10">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE771;" FontSize="14" />
+                            <TextBlock Text="Вид" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="ConnectionCategoryButton" Grid.Column="2" Tag="connection"
+                            Click="SettingsCategory_Click" Background="Transparent"
+                            Foreground="{ThemeResource TgHint}" BorderThickness="0" CornerRadius="13" Padding="8,10">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE774;" FontSize="14" />
+                            <TextBlock Text="Связь" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="DataCategoryButton" Grid.Column="3" Tag="data"
+                            Click="SettingsCategory_Click" Background="Transparent"
+                            Foreground="{ThemeResource TgHint}" BorderThickness="0" CornerRadius="13" Padding="8,10">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE8B7;" FontSize="14" />
+                            <TextBlock Text="Данные" />
+                        </StackPanel>
+                    </Button>
+                </Grid>
+            </Border>
+            <ScrollViewer x:Name="SettingsScroll" Grid.Row="2">
+                <StackPanel MaxWidth="660" HorizontalAlignment="Center" Padding="20,16,20,32" Spacing="4">
+                    <StackPanel x:Name="ProfileSettingsPanel" Spacing="4">
+                        <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,0,0,10">
+                            <Button Style="{StaticResource TgIconButton}" Padding="0" Click="PickAvatar_Click"
+                                    ToolTipService.ToolTip="Сменить фото">
+                                <Grid Width="86" Height="86">
+                                    <Border CornerRadius="43" Background="{ThemeResource TgAccent}">
+                                        <Grid>
+                                            <TextBlock x:Name="SettingsInitials" FontSize="28" FontWeight="SemiBold"
+                                                       Foreground="{ThemeResource TgOnAccent}" HorizontalAlignment="Center"
+                                                       VerticalAlignment="Center" />
+                                            <Image x:Name="SettingsAvatar" Stretch="UniformToFill" />
+                                        </Grid>
+                                    </Border>
+                                    <Border Width="28" Height="28" CornerRadius="14" Background="{ThemeResource TgAccent}"
+                                            HorizontalAlignment="Right" VerticalAlignment="Bottom">
+                                        <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE722;" FontSize="12" Foreground="{ThemeResource TgOnAccent}" />
+                                    </Border>
+                                </Grid>
+                            </Button>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock x:Name="SettingsName" FontSize="19" FontWeight="SemiBold"
+                                           Foreground="{ThemeResource TgText}" />
+                                <TextBlock x:Name="SettingsState" Foreground="{ThemeResource TgHint}" FontSize="13" />
+                                <TextBlock x:Name="MyUserId" Foreground="{ThemeResource TgHint}" FontSize="11"
+                                           FontFamily="Consolas" TextWrapping="Wrap" Margin="0,4,0,0" />
+                            </StackPanel>
+                        </StackPanel>
+                        <TextBlock Text="Профиль" Style="{StaticResource TgSectionTitle}" />
+                        <TextBox x:Name="SettingsDisplayName" Header="Видимое имя" />
+                        <TextBox x:Name="SettingsUsername" Header="Username" />
+                        <TextBox x:Name="SettingsAbout" Header="О себе" AcceptsReturn="True" MaxLength="200" />
+                        <Button Content="Сохранить и опубликовать" Click="SaveProfile_Click" Margin="0,10,0,0"
+                                Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
+                                BorderThickness="0" HorizontalAlignment="Left" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="AppearanceSettingsPanel" Spacing="4" Visibility="Collapsed">
+                        <TextBlock x:Name="ThemeSection" Text="Тема" Style="{StaticResource TgSectionTitle}" />
+                        <TextBlock x:Name="ThemeName" Foreground="{ThemeResource TgHint}" FontSize="13" />
+                        <GridView x:Name="ThemeList" Margin="0,8,0,0" Height="452"
+                                  SelectionMode="Single" IsItemClickEnabled="True" ItemClick="ThemeList_ItemClick"
+                                  ItemTemplate="{StaticResource ThemeCardTemplate}"
+                                  ItemContainerStyle="{StaticResource TgThemeItem}"
+                                  ScrollViewer.VerticalScrollMode="Disabled"
+                                  ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                                  ScrollViewer.HorizontalScrollMode="Disabled"
+                                  HorizontalAlignment="Left" />
+                        <TextBlock Text="Шрифт" Style="{StaticResource TgSectionTitle}" />
+                        <TextBlock x:Name="FontName" Foreground="{ThemeResource TgHint}" FontSize="13" />
+                        <GridView x:Name="FontList" Margin="0,8,0,0"
+                                  SelectionMode="Single" IsItemClickEnabled="True" ItemClick="FontList_ItemClick"
+                                  ItemTemplate="{StaticResource FontCardTemplate}"
+                                  ItemContainerStyle="{StaticResource TgThemeItem}"
+                                  ScrollViewer.VerticalScrollMode="Disabled"
+                                  ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                                  HorizontalAlignment="Left" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="ConnectionSettingsPanel" Spacing="4" Visibility="Collapsed">
+                        <TextBlock Text="Конфиденциальность" Style="{StaticResource TgSectionTitle}" />
+                        <ToggleSwitch x:Name="PresenceToggle" Header="Последняя активность"
+                                      OnContent="Собеседники видят «в сети»" OffContent="Скрыта: всегда «был(а) недавно»"
+                                      Toggled="Presence_Toggled" />
+                        <TextBlock Text="Сеть" Style="{StaticResource TgSectionTitle}" />
+                        <TextBlock x:Name="NetworkHint" Foreground="{ThemeResource TgHint}" FontSize="13"
+                                   TextWrapping="Wrap" Margin="0,0,0,8" />
+                        <TextBox x:Name="BootstrapInput" Header="Адрес Mailbox Node" />
+                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,10,0,0">
+                            <Button Content="Сохранить Node" Click="Connect_Click" />
+                            <Button x:Name="MetadataButton" Click="Metadata_Click" />
                         </StackPanel>
                     </StackPanel>
 
-                    <TextBlock Text="Профиль" Style="{StaticResource TgSectionTitle}" />
-                    <TextBox x:Name="SettingsDisplayName" Header="Видимое имя" />
-                    <TextBox x:Name="SettingsUsername" Header="Username" />
-                    <TextBox x:Name="SettingsAbout" Header="О себе" AcceptsReturn="True" MaxLength="200" />
-                    <Button Content="Сохранить и опубликовать" Click="SaveProfile_Click" Margin="0,10,0,0"
-                            Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}" BorderThickness="0"
-                            HorizontalAlignment="Left" />
-
-                    <TextBlock x:Name="ThemeSection" Text="Оформление" Style="{StaticResource TgSectionTitle}" />
-                    <TextBlock x:Name="ThemeName" Foreground="{ThemeResource TgHint}" FontSize="13" />
-                    <GridView x:Name="ThemeList" Margin="0,8,0,0" Height="452"
-                              SelectionMode="Single" IsItemClickEnabled="True" ItemClick="ThemeList_ItemClick"
-                              ItemTemplate="{StaticResource ThemeCardTemplate}"
-                              ItemContainerStyle="{StaticResource TgThemeItem}"
-                              ScrollViewer.VerticalScrollMode="Disabled"
-                              ScrollViewer.VerticalScrollBarVisibility="Hidden"
-                              ScrollViewer.HorizontalScrollMode="Disabled"
-                              HorizontalAlignment="Left" />
-
-                    <TextBlock Text="Конфиденциальность" Style="{StaticResource TgSectionTitle}" />
-                    <ToggleSwitch x:Name="PresenceToggle" Header="Последняя активность"
-                                  OnContent="Собеседники видят «в сети»" OffContent="Скрыта: всегда «был(а) недавно»"
-                                  Toggled="Presence_Toggled" />
-
-                    <TextBlock Text="Сеть" Style="{StaticResource TgSectionTitle}" />
-                    <TextBlock x:Name="NetworkHint" Foreground="{ThemeResource TgHint}" FontSize="13"
-                               TextWrapping="Wrap" Margin="0,0,0,8" />
-                    <TextBox x:Name="BootstrapInput" Header="Адрес Mailbox Node" />
-                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,10,0,0">
-                        <Button Content="Сохранить Node" Click="Connect_Click" />
-                        <Button x:Name="MetadataButton" Click="Metadata_Click" />
-                    </StackPanel>
-
-                    <TextBlock Text="Устройства и резервные копии" Style="{StaticResource TgSectionTitle}" />
-                    <PasswordBox x:Name="SecurityPassphrase" Header="Пароль пакета" />
-                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,10,0,0">
-                        <Button Content="Создать backup" Click="CreateBackup_Click" />
-                        <Button Content="Восстановить backup" Click="RestoreBackup_Click" />
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button Content="Связать устройство" Click="CreateDeviceLink_Click" />
-                        <Button Content="Импортировать связь" Click="ImportDeviceLink_Click" />
-                    </StackPanel>
-                    <TextBox x:Name="RevokeDeviceInput" Header="DeviceID потерянного устройства" Margin="0,8,0,0" />
-                    <Button Content="Отозвать устройство" Click="RevokeDevice_Click"
-                            Foreground="{ThemeResource TgDanger}" HorizontalAlignment="Left" />
-
-                    <TextBlock Text="Передача без прямого подключения" Style="{StaticResource TgSectionTitle}" />
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button Content="Экспорт сообщений" Click="ExportPortable_Click" />
-                        <Button Content="Доставить пакет" Click="ImportPortable_Click" />
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Button Content="Экспорт сети" Click="ExportDiscovery_Click" />
-                        <Button Content="Импорт сети" Click="ImportDiscovery_Click" />
+                    <StackPanel x:Name="DataSettingsPanel" Spacing="4" Visibility="Collapsed">
+                        <TextBlock Text="Устройства и резервные копии" Style="{StaticResource TgSectionTitle}" />
+                        <PasswordBox x:Name="SecurityPassphrase" Header="Пароль пакета" />
+                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,10,0,0">
+                            <Button Content="Создать backup" Click="CreateBackup_Click" />
+                            <Button Content="Восстановить backup" Click="RestoreBackup_Click" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Связать устройство" Click="CreateDeviceLink_Click" />
+                            <Button Content="Импортировать связь" Click="ImportDeviceLink_Click" />
+                        </StackPanel>
+                        <TextBox x:Name="RevokeDeviceInput" Header="DeviceID потерянного устройства" Margin="0,8,0,0" />
+                        <Button Content="Отозвать устройство" Click="RevokeDevice_Click"
+                                Foreground="{ThemeResource TgDanger}" HorizontalAlignment="Left" />
+                        <TextBlock Text="Передача без прямого подключения" Style="{StaticResource TgSectionTitle}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Экспорт сообщений" Click="ExportPortable_Click" />
+                            <Button Content="Доставить пакет" Click="ImportPortable_Click" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Экспорт сети" Click="ExportDiscovery_Click" />
+                            <Button Content="Импорт сети" Click="ImportDiscovery_Click" />
+                        </StackPanel>
                     </StackPanel>
 
                     <TextBlock x:Name="StatusText" Foreground="{ThemeResource TgHint}" FontSize="12"
@@ -609,7 +823,7 @@
             <Grid Height="56" Padding="10,0" Background="{ThemeResource TgPanel}" ColumnDefinitions="Auto,*"
                   ColumnSpacing="8">
                 <Button Style="{StaticResource TgIconButton}" Click="CloseProfile_Click">
-                    <FontIcon Glyph="&#xE72B;" FontSize="15" />
+                    <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE72B;" FontSize="15" />
                 </Button>
                 <TextBlock Grid.Column="1" Text="Профиль" FontSize="17" FontWeight="SemiBold"
                            VerticalAlignment="Center" Foreground="{ThemeResource TgText}" />

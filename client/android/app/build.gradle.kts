@@ -21,6 +21,8 @@ android {
         buildConfig = true
     }
 
+    sourceSets["main"].assets.srcDir("../../../shared/fonts/licenses")
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -48,5 +50,14 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // Плеер читает видео прямо из зашифрованного вложения через собственный DataSource,
+    // поэтому нужен только сам движок: элементы управления рисует Compose.
+    implementation("androidx.media3:media3-exoplayer:1.9.0")
+    // Перекодирование видео перед отправкой: у платформы нет готового API, а MediaCodec
+    // вручную — это сотни строк работы с буферами.
+    implementation("androidx.media3:media3-transformer:1.9.0")
+    implementation("androidx.media3:media3-effect:1.9.0")
+    // Поворот снимка живёт в EXIF: без него перекодированное фото ляжет набок.
+    implementation("androidx.exifinterface:exifinterface:1.4.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -9,6 +9,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.web.context.request.async.DeferredResult;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -30,9 +33,12 @@ public class MailboxV2Service {
     private final int contactPowBits;
     private final int contactMaxEnvelopeBytes;
     private final int contactMaxEnvelopes;
+    private final int maxWaitSeconds;
+    private final MailboxWaitRegistry waits;
 
     public MailboxV2Service(
             JdbcTemplate jdbc,
+            MailboxWaitRegistry waits,
             @Value("${turattext.v2.mailbox-max-ttl-hours:336}") long maxTtlHours,
             @Value("${turattext.v2.mailbox-max-envelope-bytes:524288}") int maxEnvelopeBytes,
             @Value("${turattext.v2.mailbox-max-envelopes:2000}") int maxEnvelopes,
@@ -40,9 +46,12 @@ public class MailboxV2Service {
             @Value("${turattext.v2.envelope-pow-bits:0}") int envelopePowBits,
             @Value("${turattext.v2.contact-pow-bits:0}") int contactPowBits,
             @Value("${turattext.v2.contact-max-envelope-bytes:65536}") int contactMaxEnvelopeBytes,
-            @Value("${turattext.v2.contact-max-envelopes:64}") int contactMaxEnvelopes
+            @Value("${turattext.v2.contact-max-envelopes:64}") int contactMaxEnvelopes,
+            @Value("${turattext.v2.mailbox-max-wait-seconds:25}") int maxWaitSeconds
     ) {
         this.jdbc = jdbc;
+        this.waits = waits;
+        this.maxWaitSeconds = Math.clamp(maxWaitSeconds, 0, 90);
         this.maxTtlHours = maxTtlHours;
         this.maxEnvelopeBytes = maxEnvelopeBytes;
         this.maxEnvelopes = maxEnvelopes;
@@ -139,6 +148,7 @@ public class MailboxV2Service {
                     request.recipientDeviceHint(), request.opaquePayload(), sizeClass,
                     timestamp(request.createdAt() == null ? now : request.createdAt()), timestamp(expiresAt), timestamp(now),
                     access.contact() ? "contact" : "private");
+            notifyReaders(mailboxId);
         } catch (DuplicateKeyException ignored) {
             // At-least-once delivery: the same envelope ID is idempotent.
         }
@@ -150,6 +160,59 @@ public class MailboxV2Service {
 
     public List<StoredEnvelope> fetch(UUID mailboxId, String readCapability, int requestedLimit) {
         requireMailbox(mailboxId, readCapability, true);
+        return select(mailboxId, requestedLimit);
+    }
+
+    /**
+     * Выдача конвертов с ожиданием: если ящик пуст, Node держит запрос открытым до
+     * {@code waitSeconds} и отвечает сразу, как только конверт придёт. Пустой ответ по концу
+     * окна — обычное дело, клиент просто спрашивает снова.
+     *
+     * <p>Возможность чтения проверяется до того, как читатель попадёт в очередь ожидания:
+     * держать открытый запрос без прав нельзя.
+     */
+    public DeferredResult<List<StoredEnvelope>> fetchOrWait(
+            UUID mailboxId, String readCapability, int requestedLimit, int requestedWait) {
+        requireMailbox(mailboxId, readCapability, true);
+        int wait = Math.clamp(requestedWait, 0, maxWaitSeconds);
+        List<StoredEnvelope> ready = select(mailboxId, requestedLimit);
+        DeferredResult<List<StoredEnvelope>> result =
+                new DeferredResult<>(wait * 1000L + 1000L, List::of);
+        if (wait == 0 || !ready.isEmpty()) {
+            result.setResult(ready);
+            return result;
+        }
+
+        Runnable wake = () -> {
+            if (!result.isSetOrExpired()) result.setResult(select(mailboxId, requestedLimit));
+        };
+        if (!waits.await(mailboxId, wake)) {
+            result.setResult(List.of());
+            return result;
+        }
+        result.onCompletion(() -> waits.cancel(mailboxId, wake));
+        // Конверт мог лечь между выборкой и постановкой в очередь: перепроверяем, иначе
+        // это сообщение прождало бы всё окно впустую.
+        List<StoredEnvelope> raced = select(mailboxId, requestedLimit);
+        if (!raced.isEmpty() && !result.isSetOrExpired()) result.setResult(raced);
+        return result;
+    }
+
+    private void notifyReaders(UUID mailboxId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            waits.awaken(mailboxId);
+            return;
+        }
+        // Будить до коммита нельзя: читатель успел бы сделать выборку и не увидеть конверт.
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                waits.awaken(mailboxId);
+            }
+        });
+    }
+
+    private List<StoredEnvelope> select(UUID mailboxId, int requestedLimit) {
         int limit = Math.clamp(requestedLimit, 1, 200);
         return jdbc.query("""
                 select id, protocol_version, recipient_device_hint, opaque_payload,

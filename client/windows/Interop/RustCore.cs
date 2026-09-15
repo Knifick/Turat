@@ -8,6 +8,14 @@ internal sealed partial class RustCore : IDisposable
 {
     private nint _handle;
 
+    /// <summary>
+    /// Время жизни хэндла. Ожидание конверта держит указатель десятки секунд в фоновом потоке,
+    /// поэтому освобождение ядра откладывается до конца последнего такого ожидания.
+    /// </summary>
+    private readonly object _lifetime = new();
+    private int _waiting;
+    private bool _disposed;
+
     static RustCore()
     {
         NativeLibrary.SetDllImportResolver(typeof(RustCore).Assembly, ResolveNativeLibrary);
@@ -32,7 +40,7 @@ internal sealed partial class RustCore : IDisposable
 
     public CoreResponse Invoke(object command)
     {
-        ObjectDisposedException.ThrowIf(_handle == 0, this);
+        ObjectDisposedException.ThrowIf(_disposed || _handle == 0, this);
         string request = JsonSerializer.Serialize(command, JsonOptions.Default);
         nint pointer = Native.Invoke(_handle, request);
         if (pointer == 0) throw new InvalidOperationException("Rust core вернул пустой ответ");
@@ -49,9 +57,77 @@ internal sealed partial class RustCore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Открывает вложение для потокового чтения. Ядро при этом не блокируется: у читателя
+    /// своя блокировка, поэтому воспроизведение видео не ждёт фоновую синхронизацию.
+    /// </summary>
+    public nint OpenMedia(string path)
+    {
+        ObjectDisposedException.ThrowIf(_handle == 0, this);
+        return Native.MediaOpen(_handle, path);
+    }
+
+    public static long MediaLength(nint media) => media == 0 ? -1 : Native.MediaLength(media);
+
+    /// <summary>Читает отрезок вложения; возвращает прочитанное количество байт или -1.</summary>
+    public static unsafe int ReadMedia(nint media, long offset, byte[] buffer, int bufferOffset, int count)
+    {
+        if (media == 0) return -1;
+        ArgumentOutOfRangeException.ThrowIfNegative(bufferOffset);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(bufferOffset + count, buffer.Length);
+        fixed (byte* pointer = buffer)
+        {
+            long read = Native.MediaRead(media, (ulong)offset, pointer + bufferOffset, (nuint)count);
+            return read < 0 ? -1 : (int)read;
+        }
+    }
+
+    public static void CloseMedia(nint media)
+    {
+        if (media != 0) Native.MediaClose(media);
+    }
+
+    /// <summary>
+    /// Ждёт входящий конверт на Node до <paramref name="seconds"/> секунд: 1 — сообщение
+    /// пришло, 0 — окно истекло, -1 — ждать негде или связь оборвалась. Ядро при этом не
+    /// блокируется, поэтому отправка сообщения не ждёт конца окна.
+    /// </summary>
+    public int WaitForEnvelopes(int seconds)
+    {
+        nint handle;
+        lock (_lifetime)
+        {
+            if (_disposed || _handle == 0) return -1;
+            _waiting++;
+            handle = _handle;
+        }
+        try
+        {
+            return Native.WaitForEnvelopes(handle, seconds);
+        }
+        finally
+        {
+            lock (_lifetime)
+            {
+                _waiting--;
+                ReleaseIfIdle();
+            }
+        }
+    }
+
     public void Dispose()
     {
-        if (_handle == 0) return;
+        lock (_lifetime)
+        {
+            _disposed = true;
+            ReleaseIfIdle();
+        }
+    }
+
+    /// <summary>Вызывать только под <see cref="_lifetime"/>.</summary>
+    private void ReleaseIfIdle()
+    {
+        if (!_disposed || _waiting != 0 || _handle == 0) return;
         Native.Destroy(_handle);
         _handle = 0;
     }
@@ -101,11 +177,26 @@ internal sealed partial class RustCore : IDisposable
         [LibraryImport("turattext_core.dll", EntryPoint = "turattext_core_invoke", StringMarshalling = StringMarshalling.Utf8)]
         internal static partial nint Invoke(nint handle, string requestJson);
 
+        [LibraryImport("turattext_core.dll", EntryPoint = "turattext_core_wait_for_envelopes")]
+        internal static partial int WaitForEnvelopes(nint handle, int seconds);
+
         [LibraryImport("turattext_core.dll", EntryPoint = "turattext_core_destroy")]
         internal static partial void Destroy(nint handle);
 
         [LibraryImport("turattext_core.dll", EntryPoint = "turattext_string_free")]
         internal static partial void FreeString(nint value);
+
+        [LibraryImport("turattext_core.dll", EntryPoint = "turattext_media_open", StringMarshalling = StringMarshalling.Utf8)]
+        internal static partial nint MediaOpen(nint handle, string path);
+
+        [LibraryImport("turattext_core.dll", EntryPoint = "turattext_media_length")]
+        internal static partial long MediaLength(nint media);
+
+        [LibraryImport("turattext_core.dll", EntryPoint = "turattext_media_read")]
+        internal static unsafe partial long MediaRead(nint media, ulong offset, byte* buffer, nuint length);
+
+        [LibraryImport("turattext_core.dll", EntryPoint = "turattext_media_close")]
+        internal static partial void MediaClose(nint media);
     }
 }
 

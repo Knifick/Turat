@@ -173,6 +173,9 @@ object GlassShape {
     val Panel = RoundedCornerShape(24.dp)
     val Card = RoundedCornerShape(20.dp)
     val Capsule = RoundedCornerShape(percent = 50)
+    // В отличие от Capsule радиус не растёт вместе с многострочным полем ввода: верхняя
+    // строка остаётся внутри безопасной области и первая буква не попадает под скругление.
+    val Input = RoundedCornerShape(22.dp)
 
     /** Шапка примыкает к верхнему краю экрана, поэтому скруглены только нижние углы. */
     val Header = RoundedCornerShape(bottomStart = 26.dp, bottomEnd = 26.dp)

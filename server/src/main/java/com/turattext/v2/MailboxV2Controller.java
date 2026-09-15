@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.request.async.DeferredResult;
 
 import java.time.Instant;
 import java.util.List;
@@ -47,13 +48,18 @@ public class MailboxV2Controller {
                 request.opaquePayload(), request.sizeClass(), request.createdAt(), request.expiresAt()));
     }
 
+    /**
+     * Выдача конвертов. При {@code wait > 0} Node держит запрос открытым до появления конверта:
+     * так сообщение доходит сразу, а не к следующему циклу опроса у клиента.
+     */
     @GetMapping("/{mailboxId}/envelopes")
-    public List<MailboxV2Service.StoredEnvelope> fetch(
+    public DeferredResult<List<MailboxV2Service.StoredEnvelope>> fetch(
             @PathVariable UUID mailboxId,
             @RequestHeader("X-Mailbox-Read-Capability") String capability,
-            @RequestParam(defaultValue = "100") int limit
+            @RequestParam(defaultValue = "100") int limit,
+            @RequestParam(defaultValue = "0") int wait
     ) {
-        return mailboxes.fetch(mailboxId, capability, limit);
+        return mailboxes.fetchOrWait(mailboxId, capability, limit, wait);
     }
 
     @PostMapping("/{mailboxId}/ack")

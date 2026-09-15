@@ -24,7 +24,7 @@ public class BlobV2Service {
 
     public BlobV2Service(
             JdbcTemplate jdbc,
-            @Value("${turattext.v2.blob-max-bytes:104857600}") long maxBlobBytes,
+            @Value("${turattext.v2.blob-max-bytes:536870912}") long maxBlobBytes,
             @Value("${turattext.v2.blob-max-chunk-bytes:1048576}") int maxChunkBytes
     ) {
         this.jdbc = jdbc;

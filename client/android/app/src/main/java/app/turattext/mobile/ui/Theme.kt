@@ -1,6 +1,7 @@
 package app.turattext.mobile.ui
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -8,8 +9,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import app.turattext.mobile.R
 
 /**
  * Палитра оформления Turat. Экраны читают цвета только отсюда, поэтому новая тема — это одна
@@ -422,6 +427,27 @@ enum class AppTheme(val title: String, val palette: TuratPalette) {
     }
 }
 
+/** Локально поставляемые гарнитуры: интерфейс не зависит от шрифтов, установленных в системе. */
+enum class AppFont(
+    val title: String,
+    private val resourceId: Int?,
+) {
+    System("Системный", null),
+    Lora("Lora", R.font.lora),
+    Newsreader("Newsreader", R.font.newsreader),
+    Literata("Literata", R.font.literata),
+    Ubuntu("Ubuntu", R.font.ubuntu),
+    GolosText("Golos Text", R.font.golos_text);
+
+    val family: FontFamily by lazy {
+        resourceId?.let { FontFamily(Font(it)) } ?: FontFamily.Default
+    }
+
+    companion object {
+        fun parse(value: String?): AppFont = entries.firstOrNull { it.name == value } ?: Lora
+    }
+}
+
 val LocalTurat = staticCompositionLocalOf { AppTheme.Origin.palette }
 
 object Telegram {
@@ -430,7 +456,11 @@ object Telegram {
 }
 
 @Composable
-fun TuratTextTheme(theme: AppTheme = AppTheme.Origin, content: @Composable () -> Unit) {
+fun TuratTextTheme(
+    theme: AppTheme = AppTheme.Origin,
+    font: AppFont = AppFont.Lora,
+    content: @Composable () -> Unit,
+) {
     val palette = theme.palette
     val scheme = if (palette.night) {
         darkColorScheme(
@@ -463,7 +493,31 @@ fun TuratTextTheme(theme: AppTheme = AppTheme.Origin, content: @Composable () ->
             error = palette.danger,
         )
     }
+    val typography = remember(font) { typography(font.family) }
     CompositionLocalProvider(LocalTurat provides palette) {
-        MaterialTheme(colorScheme = scheme, typography = Typography(), content = content)
+        MaterialTheme(colorScheme = scheme, typography = typography) {
+            ProvideTextStyle(MaterialTheme.typography.bodyLarge, content)
+        }
     }
+}
+
+private fun typography(family: FontFamily): Typography {
+    val base = Typography()
+    return Typography(
+        displayLarge = base.displayLarge.copy(fontFamily = family),
+        displayMedium = base.displayMedium.copy(fontFamily = family),
+        displaySmall = base.displaySmall.copy(fontFamily = family),
+        headlineLarge = base.headlineLarge.copy(fontFamily = family),
+        headlineMedium = base.headlineMedium.copy(fontFamily = family),
+        headlineSmall = base.headlineSmall.copy(fontFamily = family),
+        titleLarge = base.titleLarge.copy(fontFamily = family),
+        titleMedium = base.titleMedium.copy(fontFamily = family),
+        titleSmall = base.titleSmall.copy(fontFamily = family),
+        bodyLarge = base.bodyLarge.copy(fontFamily = family),
+        bodyMedium = base.bodyMedium.copy(fontFamily = family),
+        bodySmall = base.bodySmall.copy(fontFamily = family),
+        labelLarge = base.labelLarge.copy(fontFamily = family),
+        labelMedium = base.labelMedium.copy(fontFamily = family),
+        labelSmall = base.labelSmall.copy(fontFamily = family),
+    )
 }

@@ -56,6 +56,12 @@
             </LinearGradientBrush>
 
             <!-- Прозрачная кнопка-иконка: подсветка только при наведении. -->
+            <!-- Glyph-иконки всегда остаются в системной иконочной гарнитуре и не наследуют
+                 выбранный пользователем текстовый шрифт. -->
+            <Style TargetType="FontIcon">
+                <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            </Style>
+
             <Style x:Key="TgIconButton" TargetType="Button">
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="BorderThickness" Value="0" />
@@ -231,6 +237,23 @@
                         </ControlTemplate>
                     </Setter.Value>
                 </Setter>
+            </Style>
+
+            <!-- Контекстная карточка сообщения: компактный тёмный flyout как в Telegram. -->
+            <Style x:Key="TgMessageMenuPresenter" TargetType="MenuFlyoutPresenter">
+                <Setter Property="Background" Value="{ThemeResource TgElevated}" />
+                <Setter Property="BorderBrush" Value="{ThemeResource TgGlassRim}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="10" />
+                <Setter Property="Padding" Value="6" />
+                <Setter Property="MinWidth" Value="250" />
+            </Style>
+
+            <Style x:Key="TgMessageMenuItem" TargetType="MenuFlyoutItem">
+                <Setter Property="Foreground" Value="{ThemeResource TgText}" />
+                <Setter Property="FontSize" Value="16" />
+                <Setter Property="MinHeight" Value="46" />
+                <Setter Property="Padding" Value="14,8" />
             </Style>
 
             <!-- Карточка темы: выбранная обведена акцентом, наведённая — приглушённой рамкой. -->

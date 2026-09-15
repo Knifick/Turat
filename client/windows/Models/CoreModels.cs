@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
@@ -6,7 +8,21 @@ using Windows.UI;
 
 namespace TuratText.Windows;
 
-public sealed record CoreResponse(bool Ok, AppSnapshot? Snapshot, object? Value, string? Error);
+public sealed record CoreResponse(bool Ok, AppSnapshot? Snapshot, JsonElement? Value, string? Error)
+{
+    /// <summary>Строковое поле результата команды — например идентификатор фоновой передачи.</summary>
+    public string Text(string name) =>
+        Value is JsonElement value && value.ValueKind == JsonValueKind.Object
+        && value.TryGetProperty(name, out JsonElement found) && found.ValueKind == JsonValueKind.String
+            ? found.GetString() ?? string.Empty
+            : string.Empty;
+
+    public long Number(string name) =>
+        Value is JsonElement value && value.ValueKind == JsonValueKind.Object
+        && value.TryGetProperty(name, out JsonElement found) && found.TryGetInt64(out long number)
+            ? number
+            : 0;
+}
 
 public sealed record IdentityModel(string UserId, string DeviceId, bool IsAuthority);
 
@@ -75,9 +91,56 @@ public sealed record ChatModel(
     [JsonIgnore] public string SecurityBadge => FingerprintVerified ? "Fingerprint сверен" : "Fingerprint не сверен";
 }
 
-public sealed record AttachmentModel(string AttachmentId, string FileName, string MimeType, long Size, string LocalPath)
+/// <summary>Категория вложения: от неё зависит, рисует ли пузырь превью, плеер или карточку файла.</summary>
+public enum MediaKind
+{
+    File,
+    Image,
+    Video,
+    Audio,
+}
+
+public sealed record AttachmentModel(
+    string AttachmentId,
+    string FileName,
+    string MimeType,
+    long Size,
+    string LocalPath,
+    string? Kind = null,
+    int Width = 0,
+    int Height = 0,
+    long DurationMilliseconds = 0,
+    string? ThumbnailBase64 = null)
 {
     [JsonIgnore] public string SizeLabel => Formatting.Bytes(Size);
+
+    [JsonIgnore]
+    public MediaKind Media => Kind switch
+    {
+        "image" => MediaKind.Image,
+        "video" => MediaKind.Video,
+        "audio" => MediaKind.Audio,
+        "file" => MediaKind.File,
+        _ => MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ? MediaKind.Image
+            : MimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ? MediaKind.Video
+            : MimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) ? MediaKind.Audio
+            : MediaKind.File,
+    };
+
+    /// <summary>Превью в пузыре: ширина фиксирована, высота выводится из пропорций оригинала.</summary>
+    [JsonIgnore]
+    public double PreviewHeight => Width > 0 && Height > 0
+        ? Math.Clamp(PreviewWidth * Height / (double)Width, 120, 420)
+        : 240;
+
+    [JsonIgnore] public double PreviewWidth => 320;
+
+    [JsonIgnore]
+    public string DurationLabel => DurationMilliseconds <= 0
+        ? string.Empty
+        : TimeSpan.FromMilliseconds(DurationMilliseconds) is TimeSpan span && span.TotalHours >= 1
+            ? span.ToString(@"h\:mm\:ss")
+            : span.ToString(@"m\:ss");
 }
 
 public sealed record MessageModel(
@@ -91,10 +154,63 @@ public sealed record MessageModel(
     IReadOnlyList<string> Reactions,
     bool Delivered,
     bool Read,
+    bool Pinned,
     AttachmentModel? Attachment,
     string? ReplyToEventId,
-    string? ForwardedFrom)
+    string? ForwardedFrom) : INotifyPropertyChanged
 {
+    private ImageSource? _preview;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>
+    /// Превью картинки или кадра видео. Заполняется окном асинхронно: пузырь появляется сразу,
+    /// а расшифровка идёт следом, поэтому лента не ждёт тяжёлые вложения.
+    /// </summary>
+    [JsonIgnore]
+    public ImageSource? Preview
+    {
+        get => _preview;
+        set
+        {
+            if (ReferenceEquals(_preview, value)) return;
+            _preview = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Preview)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PlaceholderVisibility)));
+        }
+    }
+
+    /// <summary>Пока превью не готово, на его месте видна затемнённая заглушка с индикатором.</summary>
+    [JsonIgnore]
+    public Visibility PlaceholderVisibility => _preview is null ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore] public MediaKind Media => Attachment?.Media ?? MediaKind.File;
+
+    [JsonIgnore]
+    public Visibility MediaVisibility =>
+        Media is MediaKind.Image or MediaKind.Video ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Обычный файл показывается карточкой — превью у него всё равно нет.</summary>
+    [JsonIgnore]
+    public Visibility FileVisibility =>
+        Attachment is not null && Media is not (MediaKind.Image or MediaKind.Video)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    [JsonIgnore]
+    public Visibility PlayVisibility => Media == MediaKind.Video ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore] public double PreviewWidth => Attachment?.PreviewWidth ?? 320;
+    [JsonIgnore] public double PreviewHeight => Attachment?.PreviewHeight ?? 240;
+
+    /// <summary>Плашка в углу превью: длительность у видео и вес у фотографии.</summary>
+    [JsonIgnore]
+    public string MediaBadge => Attachment is null
+        ? string.Empty
+        : Media == MediaKind.Video && Attachment.DurationMilliseconds > 0
+            ? Attachment.DurationLabel
+            : Attachment.SizeLabel;
+
     /// <summary>Telegram склеивает подряд идущие сообщения одного автора в одну группу.</summary>
     [JsonIgnore] public bool FirstInGroup { get; set; } = true;
 
@@ -104,6 +220,7 @@ public sealed record MessageModel(
     [JsonIgnore] public Visibility TextVisibility => DisplayText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public string TimeLabel => Formatting.Time(CreatedAtUnixMilliseconds);
     [JsonIgnore] public string ReactionSummary => string.Join(" ", Reactions);
+    [JsonIgnore] public string PinMenuLabel => Pinned ? "Открепить" : "Закрепить";
     [JsonIgnore] public string EditedLabel => Edited ? "изм." : string.Empty;
     [JsonIgnore] public Visibility EditedVisibility => Edited ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility AttachmentVisibility => Attachment is null ? Visibility.Collapsed : Visibility.Visible;
@@ -130,13 +247,73 @@ public sealed record MessageModel(
 
     [JsonIgnore] public string Quote => Deleted ? "Сообщение удалено"
         : Text.Length > 0 ? Text
-        : Attachment is not null ? "📎 " + Attachment.FileName : "Сообщение";
+        : Attachment is null ? "Сообщение"
+        : Media switch
+        {
+            MediaKind.Image => "🖼 Фото",
+            MediaKind.Video => "🎬 Видео",
+            MediaKind.Audio => "🎧 " + Attachment.FileName,
+            _ => "📎 " + Attachment.FileName,
+        };
 
     /// <summary>Скруглениe как в Telegram: «хвост» у последнего пузыря группы.</summary>
     [JsonIgnore]
     public CornerRadius BubbleCorners => Outgoing
         ? new CornerRadius(14, FirstInGroup ? 14 : 5, LastInGroup ? 4 : 5, 14)
         : new CornerRadius(FirstInGroup ? 14 : 5, 14, 14, LastInGroup ? 4 : 5);
+}
+
+/// <summary>
+/// Строка ленты для вложения, которое прямо сейчас шифруется перед отправкой.
+/// </summary>
+/// <remarks>
+/// Сообщение появляется в базе только после того, как файл готов, поэтому до этого момента
+/// в ленте стоит эта строка: имя файла, полоса прогресса и кнопка отмены. Без неё отправка
+/// большого видео выглядела бы так, будто ничего не произошло.
+/// </remarks>
+public sealed class TransferModel(string jobId, string userId, string fileName, long total)
+    : INotifyPropertyChanged
+{
+    private long _done;
+    private long _total = total;
+    private string _error = string.Empty;
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public string JobId { get; } = jobId;
+    public string UserId { get; } = userId;
+    public string FileName { get; } = fileName;
+
+    public long Done
+    {
+        get => _done;
+        set => Set(ref _done, value);
+    }
+
+    public long Total
+    {
+        get => _total;
+        set => Set(ref _total, value);
+    }
+
+    public string Error
+    {
+        get => _error;
+        set => Set(ref _error, value);
+    }
+
+    public double Percent => _total <= 0 ? 0 : Math.Clamp(_done * 100d / _total, 0, 100);
+
+    public string SizeLabel => $"{Formatting.Bytes(_done)} из {Formatting.Bytes(_total)}";
+
+    public Visibility ErrorVisibility => _error.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    private void Set<T>(ref T field, T value)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value)) return;
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+    }
 }
 
 /// <summary>Разделитель дня в ленте сообщений.</summary>

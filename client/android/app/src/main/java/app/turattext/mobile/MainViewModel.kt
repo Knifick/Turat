@@ -5,19 +5,29 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.turattext.mobile.core.NativeCore
+import app.turattext.mobile.describeMedia
+import app.turattext.mobile.media.Compression
 import app.turattext.mobile.model.AppSnapshot
+import app.turattext.mobile.model.Attachment
+import app.turattext.mobile.model.MediaKind
 import app.turattext.mobile.model.CoreJson
+import app.turattext.mobile.model.CoreResult
+import app.turattext.mobile.model.PendingUpload
 import app.turattext.mobile.ui.AppTheme
+import app.turattext.mobile.ui.AppFont
+import app.turattext.mobile.ui.MediaTransfer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import java.io.File
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val preferences = application.getSharedPreferences("turattext-ui", Context.MODE_PRIVATE)
@@ -27,6 +37,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val busy = _busy.asStateFlow()
     private val _theme = MutableStateFlow(AppTheme.parse(preferences.getString("theme", null)))
     val theme = _theme.asStateFlow()
+    private val _font = MutableStateFlow(AppFont.parse(preferences.getString("font", null)))
+    val font = _font.asStateFlow()
+
+    /** Вложения, которые прямо сейчас шифруются перед отправкой. */
+    private val _uploads = MutableStateFlow<List<PendingUpload>>(emptyList())
+    val uploads = _uploads.asStateFlow()
+
+    /** Сохранение вложения на диск: прогресс по идентификатору сообщения. */
+    private val _downloads = MutableStateFlow<Map<String, MediaTransfer>>(emptyMap())
+    val downloads = _downloads.asStateFlow()
 
     /** Ядро однопоточное: фоновая синхронизация не должна пересекаться с действиями пользователя. */
     private val gate = Mutex()
@@ -38,14 +58,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Клиент сам держит связь с Node: первая попытка сразу после запуска, дальше — короткий
-     * интервал, пока связи нет, и спокойный, когда она есть. Кнопка синхронизации остаётся
-     * ручным ускорителем, а не единственным способом получить сообщения.
+     * Клиент сам держит связь с Node: первая попытка сразу после запуска, дальше — ожидание
+     * конверта на самой Node. Node держит запрос открытым и отвечает в тот момент, когда
+     * сообщение приходит, поэтому оно попадает в ленту за доли секунды, а не к следующему
+     * циклу опроса. Опрос по таймеру остаётся запасным путём: пока связи нет, пока Node не
+     * умеет ждать или пока ящик ещё не заведён.
      */
     private fun startBackgroundSync() = viewModelScope.launch {
         while (isActive) {
             val online = runCommand(CoreJson.command("sync"), background = true)
-            delay(if (online) OnlineSyncIntervalMilliseconds else OfflineRetryIntervalMilliseconds)
+            if (!online) {
+                delay(OfflineRetryIntervalMilliseconds)
+                continue
+            }
+            // Ожидание идёт мимо ядра и мимо `gate`: отправка сообщения его не ждёт.
+            val awaited = withContext(Dispatchers.IO) { NativeCore.waitForEnvelopes(WaitWindowSeconds) }
+            // Конверт пришёл или окно истекло — цикл сам сходит за ним. Ждать негде
+            // (-1) — возвращаемся к прежнему интервалу опроса.
+            if (awaited < 0) delay(OnlineSyncIntervalMilliseconds)
         }
     }
 
@@ -58,23 +88,238 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun runCommand(command: String, background: Boolean): Boolean {
-        val result = gate.withLock {
-            withContext(Dispatchers.IO) { CoreJson.parse(NativeCore.invoke(command)) }
-        }
-        val snapshot = result.snapshot ?: return result.ok
+    private suspend fun runCommand(command: String, background: Boolean): Boolean =
+        applySnapshot(invoke(command), background).ok
+
+    /** Вызов ядра с полным ответом: командам вложений нужен не снимок, а возвращённое значение. */
+    private suspend fun invoke(command: String): CoreResult = gate.withLock {
+        withContext(Dispatchers.IO) { CoreJson.parse(NativeCore.invoke(command)) }
+    }
+
+    private fun applySnapshot(result: CoreResult, background: Boolean): CoreResult {
+        val snapshot = result.snapshot ?: return result
         // Фоновая ошибка не должна затирать подсказку, которую пользователь только что увидел.
         _state.value = if (background && !result.ok) {
             snapshot.copy(statusMessage = _state.value.statusMessage)
         } else {
             snapshot
         }
-        return result.ok
+        return result
+    }
+
+    /**
+     * Отправка файла.
+     *
+     * Ядро шифрует его в фоне и сразу возвращает идентификатор задачи, поэтому пузырь с
+     * прогрессом появляется в ленте немедленно, а не после того как 300 МБ будут обработаны.
+     * Готовая задача превращается в сообщение командой `finish_attachment`.
+     */
+    fun startAttachment(
+        userId: String,
+        path: String,
+        attachment: Attachment,
+        caption: String?,
+        replyToEventId: String?,
+        compress: Boolean = false,
+    ) = viewModelScope.launch {
+        var source = path
+        var media = attachment
+        if (compress) {
+            compressed(userId, path, attachment, caption)?.let { (producedPath, produced) ->
+                source = producedPath
+                media = produced
+                // Копия оригинала в кэше больше не нужна: дальше в ядро уходит сжатый файл.
+                File(path).delete()
+            }
+        }
+        val path = source
+        val attachment = media
+        val started = invoke(
+            CoreJson.command(
+                "start_attachment",
+                "user_id" to userId,
+                "path" to path,
+                "mime_type" to attachment.mimeType,
+                "caption" to caption,
+                "reply_to_event_id" to replyToEventId,
+                "kind" to attachment.kind.name.lowercase(),
+                "width" to attachment.width,
+                "height" to attachment.height,
+                "duration_milliseconds" to attachment.durationMilliseconds,
+                "thumbnail_base64" to attachment.thumbnailBase64,
+            )
+        )
+        val jobId = started.value?.optString("jobId").orEmpty()
+        if (!started.ok || jobId.isEmpty()) {
+            _state.value = _state.value.copy(
+                statusMessage = started.error ?: "Не удалось начать отправку файла",
+            )
+            return@launch
+        }
+        _uploads.update {
+            it + PendingUpload(
+                jobId = jobId,
+                userId = userId,
+                attachment = attachment,
+                caption = caption.orEmpty(),
+                createdAt = System.currentTimeMillis(),
+                total = attachment.size,
+            )
+        }
+        val finished = track(jobId) { done, total ->
+            _uploads.update { list ->
+                list.map { if (it.jobId == jobId) it.copy(done = done, total = total) else it }
+            }
+        }
+        if (finished == null) {
+            _uploads.update { list -> list.filterNot { it.jobId == jobId } }
+            return@launch
+        }
+        if (finished.first) {
+            runCommand(CoreJson.command("finish_attachment", "job_id" to jobId), background = false)
+            _uploads.update { list -> list.filterNot { it.jobId == jobId } }
+        } else {
+            // Ошибку видно на самом пузыре: она исчезает вместе с ним через несколько секунд.
+            _uploads.update { list ->
+                list.map { if (it.jobId == jobId) it.copy(failed = true, error = finished.second) else it }
+            }
+            delay(FailedTransferLingerMilliseconds)
+            _uploads.update { list -> list.filterNot { it.jobId == jobId } }
+        }
+    }
+
+    /**
+     * Сжатие перед отправкой. Задачи в ядре ещё нет, поэтому на время перекодирования в ленте
+     * висит собственный пузырь с процентами: иначе выбранное видео просто пропало бы на минуту.
+     *
+     * Возвращает `null`, если сжимать нечего или не вышло, — тогда уходит оригинал.
+     */
+    private suspend fun compressed(
+        userId: String,
+        path: String,
+        attachment: Attachment,
+        caption: String?,
+    ): Pair<String, Attachment>? {
+        val context = getApplication<Application>()
+        val token = "compress-" + System.nanoTime()
+        _uploads.update {
+            it + PendingUpload(
+                jobId = token,
+                userId = userId,
+                attachment = attachment,
+                caption = caption.orEmpty(),
+                createdAt = System.currentTimeMillis(),
+                total = 100,
+                compressing = true,
+            )
+        }
+        val report: (Int) -> Unit = { percent ->
+            _uploads.update { list ->
+                list.map { if (it.jobId == token) it.copy(done = percent.toLong()) else it }
+            }
+        }
+        val target = File(
+            context.cacheDir,
+            "compressed-" + System.nanoTime() + if (attachment.kind == MediaKind.Image) ".jpg" else ".mp4",
+        )
+        val produced = try {
+            when (attachment.kind) {
+                MediaKind.Image -> Compression.image(path, target.absolutePath)
+                MediaKind.Video -> Compression.video(
+                    context,
+                    path,
+                    target.absolutePath,
+                    minOf(attachment.width, attachment.height),
+                    report,
+                )
+                else -> null
+            }
+        } finally {
+            _uploads.update { list -> list.filterNot { it.jobId == token } }
+        }
+        if (produced == null) return null
+        val mime = if (attachment.kind == MediaKind.Image) "image/jpeg" else "video/mp4"
+        val extension = if (attachment.kind == MediaKind.Image) "jpg" else "mp4"
+        return produced to describeMedia(produced, mime, renamed(attachment.fileName, extension))
+    }
+
+    /** Имя остаётся узнаваемым, но расширение должно отвечать новому содержимому файла. */
+    private fun renamed(fileName: String, extension: String): String {
+        val base = fileName.substringBeforeLast('.', fileName).ifBlank { "media" }
+        return "$base.$extension"
+    }
+
+    /** Короткое сообщение в строке состояния: отказ должен быть виден там же, где всё прочее. */
+    fun notify(message: String) {
+        _state.value = _state.value.copy(statusMessage = message)
+    }
+
+    fun cancelUpload(jobId: String) = viewModelScope.launch {
+        invoke(CoreJson.command("cancel_media_job", "job_id" to jobId))
+        _uploads.update { list -> list.filterNot { it.jobId == jobId } }
+    }
+
+    /**
+     * Сохранение вложения в файл. Расшифровка тоже идёт фоновой задачей, поэтому прогресс
+     * виден прямо на пузыре, а тяжёлое видео не блокирует интерфейс.
+     */
+    fun exportAttachment(eventId: String, destinationPath: String, after: (Boolean) -> Unit) =
+        viewModelScope.launch {
+            val started = invoke(
+                CoreJson.command(
+                    "start_export_attachment",
+                    "event_id" to eventId,
+                    "destination_path" to destinationPath,
+                )
+            )
+            val jobId = started.value?.optString("jobId").orEmpty()
+            if (!started.ok || jobId.isEmpty()) {
+                after(false)
+                return@launch
+            }
+            _downloads.update { it + (eventId to MediaTransfer(jobId, 0, 0)) }
+            val finished = track(jobId) { done, total ->
+                _downloads.update { it + (eventId to MediaTransfer(jobId, done, total)) }
+            }
+            _downloads.update { it - eventId }
+            val ok = finished?.first == true
+            if (!ok) {
+                _state.value = _state.value.copy(
+                    statusMessage = finished?.second?.ifBlank { null } ?: "Не удалось сохранить файл",
+                )
+            }
+            after(ok)
+        }
+
+    /**
+     * Следит за фоновой задачей ядра до её завершения. Возвращает `null`, если задача пропала
+     * (например была отменена), иначе — успех и текст ошибки.
+     */
+    private suspend fun track(
+        jobId: String,
+        onProgress: (Long, Long) -> Unit,
+    ): Pair<Boolean, String>? {
+        while (true) {
+            val polled = invoke(CoreJson.command("media_job", "job_id" to jobId))
+            val value = polled.value
+            if (!polled.ok || value == null) return null
+            onProgress(value.optLong("done"), value.optLong("total"))
+            when (value.optString("state")) {
+                "done" -> return true to ""
+                "failed" -> return false to value.optString("error")
+            }
+            delay(TransferPollIntervalMilliseconds)
+        }
     }
 
     fun setTheme(theme: AppTheme) {
         _theme.value = theme
         preferences.edit().putString("theme", theme.name).apply()
+    }
+
+    fun setFont(font: AppFont) {
+        _font.value = font
+        preferences.edit().putString("font", font.name).apply()
     }
 
     /** Открытие чата сразу снимает счётчик непрочитанных — как в Telegram. */
@@ -100,6 +345,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun saveDraft(userId: String, text: String) =
         execute(CoreJson.command("save_draft", "user_id" to userId, "text" to text))
 
+    /**
+     * Отметка прочтения для открытого диалога.
+     *
+     * Идёт мимо [execute]: сообщение, прочитанное прямо на глазах у пользователя, не повод
+     * зажигать индикатор занятости и затирать строку состояния.
+     */
+    fun markRead(userId: String) = viewModelScope.launch {
+        runCommand(CoreJson.command("mark_read", "user_id" to userId), background = true)
+    }
+
     fun clearHistory(userId: String) = execute(CoreJson.command("clear_history", "user_id" to userId))
     fun markUnread(userId: String) = execute(CoreJson.command("mark_unread", "user_id" to userId))
     fun search(query: String) = execute(CoreJson.command("search", "query" to query))
@@ -124,6 +379,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val OnlineSyncIntervalMilliseconds = 20_000L
+        /** Окно ожидания конверта; Node ограничивает его своей настройкой. */
+        const val WaitWindowSeconds = 25
         const val OfflineRetryIntervalMilliseconds = 6_000L
+        const val TransferPollIntervalMilliseconds = 120L
+        const val FailedTransferLingerMilliseconds = 4_000L
     }
 }

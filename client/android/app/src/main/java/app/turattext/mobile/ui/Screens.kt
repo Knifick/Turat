@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -598,13 +597,97 @@ fun ContactProfileScreen(
     }
 }
 
-/** Настройки: профиль, оформление, приватность, устройства и офлайн-перенос. */
+private enum class SettingsCategory(val title: String) {
+    Profile("Профиль"),
+    Appearance("Оформление"),
+    Connection("Приватность и сеть"),
+    Data("Данные и устройства"),
+}
+
+/** Компактные стеклянные сегменты вместо длинного непрерывного экрана настроек. */
+@Composable
+private fun SettingsCategoryPicker(selected: SettingsCategory, onSelect: (SettingsCategory) -> Unit) {
+    val colors = Telegram.colors
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp)
+            .glass(colors, GlassShape.Panel, raised = true)
+            .padding(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        SettingsCategory.entries.chunked(2).forEach { pair ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                pair.forEach { category ->
+                    val active = category == selected
+                    Box(
+                        Modifier.weight(1f).clip(GlassShape.Capsule)
+                            .background(if (active) colors.accentSoft else Color.Transparent)
+                            .border(
+                                1.dp,
+                                if (active) colors.accent.copy(alpha = .75f) else colors.glassRim.copy(alpha = .5f),
+                                GlassShape.Capsule,
+                            )
+                            .clickable { onSelect(category) }
+                            .padding(horizontal = 12.dp, vertical = 11.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            category.title,
+                            color = if (active) colors.text else colors.hint,
+                            fontSize = 13.sp,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Превью гарнитуры остаётся стеклянным и показывает реальный вид текста до выбора. */
+@Composable
+private fun FontCard(
+    font: AppFont,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val colors = Telegram.colors
+    val shape = GlassShape.Card
+    Column(
+        // glass() уже рисует собственную кромку. Отключаем её здесь и оставляем
+        // один общий контур, чтобы выбранная карточка не выглядела вложенной в рамку.
+        modifier.clip(shape).glass(colors, shape, raised = true, rim = false)
+            .border(if (selected) 2.dp else 1.dp, if (selected) colors.accent else colors.glassRim, shape)
+            .clickable(onClick = onClick)
+            .padding(13.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                font.title,
+                Modifier.weight(1f),
+                color = colors.text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                fontFamily = font.family,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text("Aa Бб", color = colors.accent, fontSize = 16.sp, fontFamily = font.family)
+        }
+    }
+}
+
+/** Настройки: четыре категории вместо одного перегруженного полотна. */
 @Composable
 fun SettingsScreen(
     state: AppSnapshot,
     theme: AppTheme,
+    font: AppFont,
     actions: AppActions,
     onThemeChange: (AppTheme) -> Unit,
+    onFontChange: (AppFont) -> Unit,
     onBack: () -> Unit,
 ) {
     val colors = Telegram.colors
@@ -615,8 +698,14 @@ fun SettingsScreen(
     var node by remember { mutableStateOf(state.settings.bootstrapUrl) }
     var passphrase by remember { mutableStateOf("") }
     var revokeId by remember { mutableStateOf("") }
+    var category by remember { mutableStateOf(SettingsCategory.Profile) }
 
     TelegramScreen("Настройки", onBack) {
+        // Категории — обычный элемент списка: они прокручиваются вместе с остальными
+        // настройками и не перекрывают содержимое закреплённой шапкой.
+        item { SettingsCategoryPicker(category) { category = it } }
+
+        if (category == SettingsCategory.Profile) {
         item {
             Column(
                 Modifier.fillMaxWidth().padding(14.dp)
@@ -686,7 +775,9 @@ fun SettingsScreen(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             )
         }
+        }
 
+        if (category == SettingsCategory.Appearance) {
         item { SectionTitle("Тема") }
         items(AppTheme.entries.chunked(2)) { pair ->
             Row(
@@ -700,6 +791,21 @@ fun SettingsScreen(
             }
         }
 
+        item { SectionTitle("Шрифт") }
+        items(AppFont.entries.chunked(2)) { pair ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                pair.forEach { choice ->
+                    FontCard(choice, choice == font, Modifier.weight(1f)) { onFontChange(choice) }
+                }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+        }
+
+        if (category == SettingsCategory.Connection) {
         item { SectionTitle("Конфиденциальность") }
         item {
             SectionSwitch(
@@ -739,7 +845,9 @@ fun SettingsScreen(
                 }
             }
         }
+        }
 
+        if (category == SettingsCategory.Data) {
         item { SectionTitle("Устройства и резервные копии") }
         item { TelegramField(passphrase, { passphrase = it }, "Пароль пакета", password = true) }
         item {
@@ -781,6 +889,7 @@ fun SettingsScreen(
                 "Экспорт сети", { actions.export("export_discovery", "", "network.ttbridge") },
                 "Импорт сети", { actions.importFile("import_discovery", "", arrayOf("*/*")) },
             )
+        }
         }
 
         item {

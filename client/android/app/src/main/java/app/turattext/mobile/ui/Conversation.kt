@@ -30,7 +30,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -73,10 +73,10 @@ import androidx.compose.ui.unit.sp
 import app.turattext.mobile.R
 import app.turattext.mobile.model.AppSnapshot
 import app.turattext.mobile.model.Contact
+import app.turattext.mobile.model.MediaKind
 import app.turattext.mobile.model.Message
+import app.turattext.mobile.model.PendingUpload
 import kotlinx.coroutines.launch
-
-val Reactions = listOf("❤", "🔥", "👌", "😱", "😭", "🤨", "👍", "💔")
 
 /** Элемент ленты: разделитель дня либо сообщение со сведениями о группировке. */
 sealed interface FeedItem {
@@ -90,10 +90,15 @@ sealed interface FeedItem {
     ) : FeedItem {
         override val key get() = message.eventId
     }
+
+    /** Файл, который ещё шифруется: в ленте он стоит там же, где встанет готовое сообщение. */
+    data class Uploading(val upload: PendingUpload) : FeedItem {
+        override val key get() = "upload-" + upload.jobId
+    }
 }
 
 /** Telegram склеивает подряд идущие сообщения одного автора в группу с одним «хвостом». */
-fun buildFeed(messages: List<Message>): List<FeedItem> {
+fun buildFeed(messages: List<Message>, uploads: List<PendingUpload> = emptyList()): List<FeedItem> {
     val items = mutableListOf<FeedItem>()
     val grouped = { left: Message?, right: Message ->
         left != null && left.outgoing == right.outgoing &&
@@ -112,13 +117,17 @@ fun buildFeed(messages: List<Message>): List<FeedItem> {
         val last = next == null || !grouped(message, next) || next.replyToEventId != null
         items += FeedItem.Bubble(message, first, last)
     }
+    uploads.forEach { items += FeedItem.Uploading(it) }
     return items
 }
 
 @Composable
 fun ConversationPane(
+    listState: LazyListState,
     state: AppSnapshot,
     actions: AppActions,
+    uploads: List<PendingUpload>,
+    downloads: Map<String, MediaTransfer>,
     showBack: Boolean,
     onBack: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -139,10 +148,11 @@ fun ConversationPane(
     var editingId by remember(contact.userId) { mutableStateOf<String?>(null) }
     var replyToId by remember(contact.userId) { mutableStateOf<String?>(null) }
     var headerMenu by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
-    val feed = remember(state.messages) { buildFeed(state.messages) }
+    val mine = remember(uploads, contact.userId) { uploads.filter { it.userId == contact.userId } }
+    val feed = remember(state.messages, mine) { buildFeed(state.messages, mine) }
+    var viewing by remember(contact.userId) { mutableStateOf<Message?>(null) }
     val messageById = remember(state.messages) { state.messages.associateBy { it.eventId } }
 
     // Черновик Telegram переживает выход из чата и виден в списке диалогов.
@@ -153,6 +163,14 @@ fun ConversationPane(
         onDispose {
             if (latestDraft.trim() != savedDraft) actions.saveDraft(userId, latestDraft)
         }
+    }
+
+    // Сообщение, пришедшее в открытый диалог, прочитано в тот же момент: возвращаться в чат
+    // ради этого не нужно. Эффект живёт внутри `ConversationPane`, а она существует ровно пока
+    // диалог на экране, — поэтому отметка не ставится закрытому чату.
+    val unread = state.selectedChat?.unreadCount ?: 0
+    LaunchedEffect(contact.userId, unread) {
+        if (unread > 0) actions.markRead(contact.userId)
     }
 
     // Открытый диалог показывается с конца; дальше лента уезжает вниз, только если пользователь
@@ -190,128 +208,212 @@ fun ConversationPane(
         scope.launch { if (feed.isNotEmpty()) listState.animateScrollToItem(feed.lastIndex) }
     }
 
-    Column(
-        modifier.fillMaxSize()
-            .background(Brush.verticalGradient(listOf(colors.chatTop.copy(alpha = 0.55f), colors.chatBottom))),
-    ) {
-        Column(Modifier.glass(colors, GlassShape.Header, raised = true).statusBarsPadding()) {
-            if (selected.isEmpty()) {
-                ConversationHeader(
-                    contact = contact,
-                    showBack = showBack,
-                    onBack = onBack,
-                    onOpenProfile = onOpenProfile,
-                    menuOpen = headerMenu,
-                    onMenu = { headerMenu = it },
-                    onClearHistory = { actions.clearHistory(contact.userId) },
-                    onMute = { actions.setMuted(contact.userId, !contact.muted) },
-                    onDeleteChat = { actions.deleteContact(contact.userId) },
-                )
-            } else {
-                SelectionBar(
-                    count = selected.size,
-                    canEdit = selected.size == 1 &&
-                        state.messages.any { it.eventId == selected.first() && it.outgoing && !it.deleted },
-                    onClear = { selected.clear() },
-                    onCopy = {
-                        val text = state.messages.filter { it.eventId in selected && !it.deleted }
-                            .joinToString("\n") { it.text }
-                        if (text.isNotBlank()) clipboard.setText(AnnotatedString(text))
-                        selected.clear()
-                    },
-                    onForward = { onForward(selected.toSet()); selected.clear() },
-                    onReact = { actions.react(selected.toSet(), it); selected.clear() },
-                    onEdit = {
-                        val message = state.messages.first { it.eventId == selected.first() }
-                        editingId = message.eventId
-                        draft = message.text
-                        selected.clear()
-                    },
-                    onDelete = { actions.deleteMessages(selected.toSet()); selected.clear() },
-                )
-            }
-        }
-
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (feed.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    ServicePill(
-                        if (contact.pending) "Собеседник ждёт вашего ответа"
-                        else "Сообщения защищены сквозным шифрованием",
+    // Просмотр вложения перекрывает диалог целиком, поэтому он живёт в общем с ним Box,
+    // а не в родительской раскладке: на планшете лента и список чатов не должны разъезжаться.
+    Box(modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize()
+                // Диалог имеет собственный непрозрачный фон. Иначе Liquid Glass показывал под ним
+                // строки списка чатов, из-за чего текст двух экранов накладывался друг на друга.
+                .background(Brush.verticalGradient(listOf(colors.chatTop, colors.chatBottom))),
+        ) {
+            Column(Modifier.glass(colors, GlassShape.Header, raised = true).statusBarsPadding()) {
+                if (selected.isEmpty()) {
+                    ConversationHeader(
+                        contact = contact,
+                        showBack = showBack,
+                        onBack = onBack,
+                        onOpenProfile = onOpenProfile,
+                        menuOpen = headerMenu,
+                        onMenu = { headerMenu = it },
+                        onClearHistory = { actions.clearHistory(contact.userId) },
+                        onMute = { actions.setMuted(contact.userId, !contact.muted) },
+                        onDeleteChat = { actions.deleteContact(contact.userId) },
+                    )
+                } else {
+                    SelectionBar(
+                        count = selected.size,
+                        canEdit = selected.size == 1 &&
+                            state.messages.any { it.eventId == selected.first() && it.outgoing && !it.deleted },
+                        onClear = { selected.clear() },
+                        onCopy = {
+                            val text = state.messages.filter { it.eventId in selected && !it.deleted }
+                                .joinToString("\n") { it.text }
+                            if (text.isNotBlank()) clipboard.setText(AnnotatedString(text))
+                            selected.clear()
+                        },
+                        onForward = { onForward(selected.toSet()); selected.clear() },
+                        onEdit = {
+                            val message = state.messages.first { it.eventId == selected.first() }
+                            editingId = message.eventId
+                            draft = message.text
+                            selected.clear()
+                        },
+                        onDelete = { actions.deleteMessages(selected.toSet()); selected.clear() },
                     )
                 }
             }
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
-            ) {
-                items(feed, key = { it.key }) { item ->
-                    when (item) {
-                        is FeedItem.Day -> Box(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                            ServicePill(item.label, Modifier.align(Alignment.Center))
-                        }
 
-                        is FeedItem.Bubble -> MessageRow(
-                            item = item,
-                            repliedTo = item.message.replyToEventId?.let(messageById::get),
-                            contactName = contact.displayName,
-                            selectionMode = selected.isNotEmpty(),
-                            selected = item.message.eventId in selected,
-                            onToggle = {
-                                if (item.message.eventId in selected) selected.remove(item.message.eventId)
-                                else selected.add(item.message.eventId)
-                            },
-                            onReply = { replyToId = item.message.eventId },
-                            onForward = { onForward(setOf(item.message.eventId)) },
-                            onOpenReplied = { id -> scrollTo(id) },
-                            onReact = { actions.react(setOf(item.message.eventId), it) },
-                            onCopy = { clipboard.setText(AnnotatedString(item.message.text)) },
-                            onEdit = {
-                                editingId = item.message.eventId
-                                draft = item.message.text
-                            },
-                            onDelete = { actions.deleteMessages(setOf(item.message.eventId)) },
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (feed.isEmpty()) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        ServicePill(
+                            if (contact.pending) "Собеседник ждёт вашего ответа"
+                            else "Сообщения защищены сквозным шифрованием",
                         )
                     }
                 }
-            }
-            ScrollDownButton(
-                visible = listState.canScrollForward,
-                onClick = { scope.launch { listState.animateScrollToItem(feed.lastIndex) } },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
-            )
-        }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                ) {
+                    items(feed, key = { it.key }) { item ->
+                        when (item) {
+                            is FeedItem.Day -> Box(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                                ServicePill(item.label, Modifier.align(Alignment.Center))
+                            }
 
-        if (contact.pending) {
-            PendingBar(
-                onAccept = { actions.acceptContact(contact.userId) },
-                onReject = { actions.rejectContact(contact.userId) },
-            )
-        } else {
-            Column(Modifier.glass(colors, GlassShape.Footer, raised = true).imePadding()) {
-                val replied = replyToId?.let(messageById::get)
-                if (editingId != null) {
-                    ComposerBanner(
-                        icon = R.drawable.ic_edit,
-                        title = "Редактирование",
-                        text = draft.ifBlank { "сообщение" },
-                        onCancel = { editingId = null; draft = "" },
-                    )
-                } else if (replied != null) {
-                    ComposerBanner(
-                        icon = R.drawable.ic_reply,
-                        title = if (replied.outgoing) "Вы" else contact.displayName,
-                        text = quoteOf(replied),
-                        onCancel = { replyToId = null },
+                            is FeedItem.Bubble -> MessageRow(
+                                item = item,
+                                repliedTo = item.message.replyToEventId?.let(messageById::get),
+                                contactName = contact.displayName,
+                                selectionMode = selected.isNotEmpty(),
+                                selected = item.message.eventId in selected,
+                                transfer = downloads[item.message.eventId],
+                                onToggle = {
+                                    if (item.message.eventId in selected) selected.remove(item.message.eventId)
+                                    else selected.add(item.message.eventId)
+                                },
+                                onOpenReplied = { id -> scrollTo(id) },
+                                onOpenMedia = { viewing = item.message },
+                                onSaveAttachment = { actions.saveAttachment(item.message) },
+                                onCancelTransfer = { downloads[item.message.eventId]?.let { actions.cancelTransfer(it.jobId) } },
+                            )
+
+                            is FeedItem.Uploading -> UploadRow(
+                                upload = item.upload,
+                                onCancel = { actions.cancelTransfer(item.upload.jobId) },
+                            )
+                        }
+                    }
+                }
+                ScrollDownButton(
+                    visible = selected.isEmpty() && listState.canScrollForward,
+                    onClick = { scope.launch { listState.animateScrollToItem(feed.lastIndex) } },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp),
+                )
+            }
+
+            if (selected.isNotEmpty()) {
+                SelectionActionsBar(
+                    canReply = selected.size == 1 &&
+                        state.messages.any { it.eventId == selected.first() && !it.deleted },
+                    onReply = {
+                        replyToId = selected.single()
+                        editingId = null
+                        selected.clear()
+                    },
+                    onForward = {
+                        onForward(selected.toSet())
+                        selected.clear()
+                    },
+                )
+            } else if (contact.pending) {
+                PendingBar(
+                    onAccept = { actions.acceptContact(contact.userId) },
+                    onReject = { actions.rejectContact(contact.userId) },
+                )
+            } else {
+                Column(Modifier.glass(colors, GlassShape.Footer, raised = true).imePadding()) {
+                    val replied = replyToId?.let(messageById::get)
+                    if (editingId != null) {
+                        ComposerBanner(
+                            icon = R.drawable.ic_edit,
+                            title = "Редактирование",
+                            text = draft.ifBlank { "сообщение" },
+                            onCancel = { editingId = null; draft = "" },
+                        )
+                    } else if (replied != null) {
+                        ComposerBanner(
+                            icon = R.drawable.ic_reply,
+                            title = if (replied.outgoing) "Вы" else contact.displayName,
+                            text = quoteOf(replied),
+                            onCancel = { replyToId = null },
+                        )
+                    }
+                    Composer(
+                        draft = draft,
+                        onDraftChange = { draft = it },
+                        onAttach = actions.pickAttachment,
+                        onSend = ::submit,
                     )
                 }
-                Composer(
-                    draft = draft,
-                    onDraftChange = { draft = it },
-                    onAttach = actions.pickAttachment,
-                    onSend = ::submit,
-                )
+            }
+        }
+
+        viewing?.attachment?.let { attachment ->
+            val message = viewing
+            BackHandler(enabled = true) { viewing = null }
+            MediaViewer(
+                attachment = attachment,
+                onClose = { viewing = null },
+                onSave = { message?.let(actions.saveAttachment) },
+            )
+    }
+    }
+}
+
+/** Пузырь ещё не отправленного файла: то же оформление, но с кольцом прогресса. */
+@Composable
+private fun UploadRow(upload: PendingUpload, onCancel: () -> Unit) {
+    val colors = Telegram.colors
+    Box(Modifier.fillMaxWidth().padding(top = 8.dp, start = 2.dp, end = 2.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Box(
+                Modifier.widthIn(max = 480.dp)
+                    .clip(RoundedCornerShape(20.dp, 20.dp, 5.dp, 20.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(colors.bubbleOut.copy(alpha = 0.94f), colors.bubbleOut.copy(alpha = 0.82f)),
+                        ),
+                    )
+                    .border(
+                        1.dp,
+                        colors.glassRim.copy(alpha = colors.glassRim.alpha * 0.7f),
+                        RoundedCornerShape(20.dp, 20.dp, 5.dp, 20.dp),
+                    )
+                    .padding(start = 12.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
+            ) {
+                Column {
+                    // Перекодирование крупного ролика идёт заметно дольше отправки, и молчащий
+                    // прогресс выглядел бы как зависший клиент.
+                    if (upload.compressing) {
+                        Text(
+                            "Сжатие… ${upload.done}%",
+                            color = colors.bubbleOutText.copy(alpha = 0.75f),
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                        )
+                    }
+                    AttachmentBlock(
+                        attachment = upload.attachment,
+                        outgoing = true,
+                        transfer = MediaTransfer(
+                            jobId = upload.jobId,
+                            done = upload.done,
+                            total = if (upload.total > 0) upload.total else upload.attachment.size,
+                            failed = upload.failed,
+                            error = upload.error,
+                        ),
+                        onOpen = {},
+                        onSave = {},
+                        onCancel = onCancel,
+                    )
+                    if (upload.caption.isNotBlank()) {
+                        Text(upload.caption, color = colors.bubbleOutText, fontSize = 16.sp)
+                    }
+                }
             }
         }
     }
@@ -435,12 +537,10 @@ private fun SelectionBar(
     onClear: () -> Unit,
     onCopy: () -> Unit,
     onForward: () -> Unit,
-    onReact: (String) -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val colors = Telegram.colors
-    var reactionMenu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -449,23 +549,12 @@ private fun SelectionBar(
             Icon(painterResource(R.drawable.ic_close), "Снять выделение", Modifier.size(20.dp), colors.text)
         }
         Text(
-            "$count",
+            "Выбрано $count",
             Modifier.weight(1f).padding(start = 8.dp),
             color = colors.text,
             fontSize = 18.sp,
             fontWeight = FontWeight.Medium,
         )
-        Box {
-            IconButton({ reactionMenu = true }) {
-                Icon(painterResource(R.drawable.ic_reaction), "Реакция", Modifier.size(21.dp), colors.text)
-            }
-            DropdownMenu(reactionMenu, { reactionMenu = false }) {
-                ReactionRow { reactionMenu = false; onReact(it) }
-            }
-        }
-        IconButton(onForward) {
-            Icon(painterResource(R.drawable.ic_forward), "Переслать", Modifier.size(20.dp), colors.text)
-        }
         IconButton(onCopy) {
             Icon(painterResource(R.drawable.ic_copy), "Копировать", Modifier.size(20.dp), colors.text)
         }
@@ -474,23 +563,66 @@ private fun SelectionBar(
                 Icon(painterResource(R.drawable.ic_edit), "Изменить", Modifier.size(20.dp), colors.text)
             }
         }
+        IconButton(onForward) {
+            Icon(painterResource(R.drawable.ic_forward), "Переслать", Modifier.size(20.dp), colors.text)
+        }
         IconButton(onDelete) {
             Icon(painterResource(R.drawable.ic_delete), "Удалить", Modifier.size(20.dp), colors.danger)
         }
     }
 }
 
+/** Нижние действия режима выбора: поле ввода полностью уступает им место, как в Telegram. */
 @Composable
-fun ReactionRow(onPick: (String) -> Unit) {
-    Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        Reactions.forEach { value ->
-            Box(
-                Modifier.size(38.dp).clip(CircleShape).clickable { onPick(value) },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(value, fontSize = 21.sp)
-            }
+private fun SelectionActionsBar(
+    canReply: Boolean,
+    onReply: () -> Unit,
+    onForward: () -> Unit,
+) {
+    val colors = Telegram.colors
+    Row(
+        Modifier.fillMaxWidth()
+            .glass(colors, GlassShape.Footer, raised = true)
+            .navigationBarsPadding()
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (canReply) {
+            SelectionAction(
+                icon = R.drawable.ic_reply,
+                title = "Ответить",
+                onClick = onReply,
+                modifier = Modifier.weight(1f),
+            )
         }
+        SelectionAction(
+            icon = R.drawable.ic_forward,
+            title = "Переслать",
+            onClick = onForward,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun SelectionAction(
+    icon: Int,
+    title: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = Telegram.colors
+    Row(
+        modifier.height(52.dp)
+            .clip(GlassShape.Capsule)
+            .glass(colors, GlassShape.Capsule)
+            .clickable(onClick = onClick),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(painterResource(icon), null, Modifier.size(22.dp), colors.text)
+        Spacer(Modifier.width(10.dp))
+        Text(title, color = colors.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -502,18 +634,15 @@ private fun MessageRow(
     contactName: String,
     selectionMode: Boolean,
     selected: Boolean,
+    transfer: MediaTransfer?,
     onToggle: () -> Unit,
-    onReply: () -> Unit,
-    onForward: () -> Unit,
     onOpenReplied: (String) -> Unit,
-    onReact: (String) -> Unit,
-    onCopy: () -> Unit,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
+    onOpenMedia: () -> Unit,
+    onSaveAttachment: () -> Unit,
+    onCancelTransfer: () -> Unit,
 ) {
     val colors = Telegram.colors
     val message = item.message
-    var menu by remember { mutableStateOf(false) }
     Box(
         Modifier.fillMaxWidth()
             .background(if (selected) colors.accent.copy(alpha = .18f) else Color.Transparent)
@@ -522,7 +651,6 @@ private fun MessageRow(
     ) {
         Row(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start,
             verticalAlignment = Alignment.Bottom,
         ) {
             if (selectionMode) {
@@ -538,34 +666,26 @@ private fun MessageRow(
                     }
                 }
             }
-            Box {
+            Row(
+                Modifier.weight(1f),
+                horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start,
+            ) {
                 MessageBubble(
                     message = message,
                     repliedTo = repliedTo,
                     contactName = contactName,
                     first = item.first,
                     last = item.last,
+                    transfer = transfer,
                     onOpenReplied = onOpenReplied,
+                    onOpenMedia = onOpenMedia,
+                    onSaveAttachment = onSaveAttachment,
+                    onCancelTransfer = onCancelTransfer,
                     modifier = Modifier.combinedClickable(
                         onClick = { if (selectionMode) onToggle() },
-                        onLongClick = { menu = true },
+                        onLongClick = onToggle,
                     ),
                 )
-                DropdownMenu(menu, { menu = false }) {
-                    if (!message.deleted) ReactionRow { menu = false; onReact(it) }
-                    if (!message.deleted) {
-                        MenuRow(R.drawable.ic_reply, "Ответить") { menu = false; onReply() }
-                        MenuRow(R.drawable.ic_forward, "Переслать") { menu = false; onForward() }
-                        MenuRow(R.drawable.ic_copy, "Копировать") { menu = false; onCopy() }
-                    }
-                    if (message.outgoing && !message.deleted) {
-                        MenuRow(R.drawable.ic_edit, "Изменить") { menu = false; onEdit() }
-                    }
-                    MenuRow(R.drawable.ic_check, "Выделить") { menu = false; onToggle() }
-                    if (message.outgoing && !message.deleted) {
-                        MenuRow(R.drawable.ic_delete, "Удалить", danger = true) { menu = false; onDelete() }
-                    }
-                }
             }
         }
     }
@@ -574,7 +694,12 @@ private fun MessageRow(
 fun quoteOf(message: Message): String = when {
     message.deleted -> "Сообщение удалено"
     message.text.isNotBlank() -> message.text
-    message.attachment != null -> "📎 ${message.attachment.fileName}"
+    message.attachment != null -> when (message.attachment.kind) {
+        MediaKind.Image -> "🖼 Фото"
+        MediaKind.Video -> "🎬 Видео"
+        MediaKind.Audio -> "🎧 " + message.attachment.fileName
+        MediaKind.File -> "📎 " + message.attachment.fileName
+    }
     else -> "Сообщение"
 }
 
@@ -586,7 +711,11 @@ private fun MessageBubble(
     contactName: String,
     first: Boolean,
     last: Boolean,
+    transfer: MediaTransfer?,
     onOpenReplied: (String) -> Unit,
+    onOpenMedia: () -> Unit,
+    onSaveAttachment: () -> Unit,
+    onCancelTransfer: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = Telegram.colors
@@ -680,38 +809,14 @@ private fun MessageBubble(
                 }
             }
             message.attachment?.let { attachment ->
-                Row(
-                    Modifier.padding(vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier.size(40.dp).clip(CircleShape)
-                            .background(
-                                if (outgoing) colors.bubbleOutText.copy(alpha = .20f)
-                                else colors.accent.copy(alpha = .18f),
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            painterResource(R.drawable.ic_file),
-                            null,
-                            Modifier.size(20.dp),
-                            if (outgoing) colors.bubbleOutText else colors.accent,
-                        )
-                    }
-                    Spacer(Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            attachment.fileName,
-                            color = textColor,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(formatBytes(attachment.size), color = metaColor, fontSize = 12.sp)
-                    }
-                }
+                AttachmentBlock(
+                    attachment = attachment,
+                    outgoing = outgoing,
+                    transfer = transfer,
+                    onOpen = onOpenMedia,
+                    onSave = onSaveAttachment,
+                    onCancel = onCancelTransfer,
+                )
             }
             if (body.isNotBlank()) {
                 if (inlineMeta) {
@@ -827,8 +932,8 @@ private fun Composer(
         }
         Box(
             Modifier.weight(1f).heightIn(min = 44.dp)
-                .clip(GlassShape.Capsule)
-                .glass(colors, GlassShape.Capsule)
+                .clip(GlassShape.Input)
+                .glass(colors, GlassShape.Input)
                 .padding(horizontal = 14.dp),
             contentAlignment = Alignment.CenterStart,
         ) {

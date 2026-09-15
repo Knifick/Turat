@@ -1,4 +1,12 @@
-use std::{fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use argon2::Argon2;
@@ -6,16 +14,96 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
 
+mod delivery;
+
 use crate::{
     CoreError,
+    blobs::{self, AttachmentManifest},
     identity::{StoredIdentity, conversation_id},
+    media::{self, Progress},
     models::{
-        Attachment, Chat, Command, Contact, Message, MetadataProtection, Profile, Response,
-        SearchHit, Snapshot,
+        Attachment, Chat, Command, Contact, MediaKind, Message, MetadataProtection, Profile,
+        Response, SearchHit, Snapshot,
     },
-    network::{Network, expected_node_for},
+    network::{MailboxWatch, Network, expected_node_for},
+    protocol::{
+        AttachmentPayload, EditPayload, KIND_ATTACHMENT, KIND_DELETE, KIND_EDIT, KIND_REACTION,
+        KIND_RECEIPT_DELIVERY, KIND_RECEIPT_READ, KIND_TEXT, PROTOCOL_VERSION, ReactionPayload,
+        TargetPayload,
+        TextPayload,
+    },
     store::Store,
 };
+
+/// Размер в понятном человеку виде: сообщение об отказе должно называть предел так,
+/// как его назвал бы сам пользователь, а не в байтах.
+fn format_size(bytes: u64) -> String {
+    const MEGABYTE: u64 = 1024 * 1024;
+    if bytes >= 1024 * MEGABYTE {
+        format!("{:.1} ГБ", bytes as f64 / (1024 * MEGABYTE) as f64)
+    } else {
+        format!("{} МБ", bytes / MEGABYTE)
+    }
+}
+
+/// Фото и видео клиент сжимает перед отправкой, поэтому исходник может быть крупным:
+/// до Node доедет уже сжатое. Настоящий предел всё равно не выше того, что Node объявил
+/// в дескрипторе, — хранилище у него конечно.
+const MAXIMUM_MEDIA_BYTES: u64 = 512 * 1024 * 1024;
+/// Файл уходит как есть, байт в байт, поэтому предел на него заметно строже.
+const MAXIMUM_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+const JOB_RUNNING: u8 = 0;
+const JOB_DONE: u8 = 1;
+const JOB_FAILED: u8 = 2;
+
+/// Фоновая передача вложения: шифрование при отправке или расшифровка при сохранении.
+/// Интерфейс опрашивает её командой `media_job` и рисует понятный прогресс вместо
+/// замершего окна.
+pub struct MediaJob {
+    pub progress: Arc<Progress>,
+    state: Arc<AtomicU8>,
+    error: Arc<Mutex<String>>,
+    /// Заготовка сообщения: заполнена только у задач отправки.
+    pending: Option<PendingAttachment>,
+    /// Идентификатор вложения у фоновых загрузок входящих файлов.
+    attachment_id: Option<String>,
+}
+
+/// Всё, что нужно, чтобы после завершения шифрования создать сообщение с вложением.
+struct PendingAttachment {
+    user_id: String,
+    caption: String,
+    reply_to_event_id: Option<String>,
+    attachment: Attachment,
+    /// Манифест выложенного файла: его заполняет фоновый поток, когда выгрузка закончена.
+    manifest: Arc<Mutex<Option<AttachmentManifest>>>,
+}
+
+impl MediaJob {
+    fn state(&self) -> u8 {
+        self.state.load(Ordering::Relaxed)
+    }
+
+    fn error(&self) -> String {
+        self.error.lock().map(|value| value.clone()).unwrap_or_default()
+    }
+
+    fn describe(&self, job_id: &str) -> serde_json::Value {
+        let state = match self.state() {
+            JOB_DONE => "done",
+            JOB_FAILED => "failed",
+            _ => "running",
+        };
+        json!({
+            "jobId": job_id,
+            "state": state,
+            "done": self.progress.done.load(Ordering::Relaxed),
+            "total": self.progress.total.load(Ordering::Relaxed),
+            "error": self.error(),
+        })
+    }
+}
 
 /// Опрос «последней активности» контактов: реже, чем сама синхронизация.
 const PRESENCE_POLL_INTERVAL_MILLISECONDS: i64 = 60_000;
@@ -32,6 +120,11 @@ pub struct AppCore {
     /// Опрос «последней активности» стоит запроса на контакт: фоновая синхронизация делает его
     /// заметно реже, чем всё остальное.
     last_presence_poll_unix_milliseconds: i64,
+    /// Активные фоновые передачи вложений по идентификатору задачи.
+    media_jobs: HashMap<String, MediaJob>,
+    /// Адрес собственного ящика для фонового ожидания конверта. Наблюдатель работает вне
+    /// замка ядра, поэтому ожидание не мешает пользователю отправлять сообщения.
+    watch: Arc<Mutex<Option<MailboxWatch>>>,
 }
 
 impl AppCore {
@@ -39,6 +132,9 @@ impl AppCore {
         let store = Store::open(app_dir, vault_key)?;
         let identity = store.load_or_create_identity()?;
         let selected_contact = store.selected_contact()?;
+        // Ящик известен ещё до первой синхронизации: ожидание конверта начинается сразу
+        // после запуска, а не после первого успешного цикла.
+        let watch = store.mailbox()?.as_ref().map(MailboxWatch::of);
         Ok(Self {
             store,
             identity,
@@ -48,28 +144,52 @@ impl AppCore {
             status: "Локальное хранилище готово".to_owned(),
             search_query: String::new(),
             last_presence_poll_unix_milliseconds: 0,
+            media_jobs: HashMap::new(),
+            watch: Arc::new(Mutex::new(watch)),
         })
     }
 
+    /// Общий с наблюдателем адрес ящика: пока он пуст, клиенту остаётся обычный опрос.
+    pub fn watch_handle(&self) -> Arc<Mutex<Option<MailboxWatch>>> {
+        Arc::clone(&self.watch)
+    }
+
+    pub(crate) fn publish_watch(&self, mailbox: &crate::mailbox::OwnedMailbox) {
+        if let Ok(mut slot) = self.watch.lock() {
+            *slot = Some(MailboxWatch::of(mailbox));
+        }
+    }
+
     pub fn invoke(&mut self, request: &str) -> String {
-        let result = serde_json::from_str::<Command>(request)
-            .map_err(CoreError::from)
-            .and_then(|command| self.execute(command));
+        let parsed = serde_json::from_str::<Command>(request).map_err(CoreError::from);
+        // Опрос прогресса идёт несколько раз в секунду: гнать в ответ весь снимок с историей
+        // и аватарами ради двух чисел незачем.
+        let quiet = matches!(
+            parsed,
+            Ok(Command::MediaJob { .. }) | Ok(Command::AttachmentSource { .. })
+        );
+        let result = parsed.and_then(|command| self.execute(command));
         let response = match result {
             Ok(value) => Response {
                 ok: true,
-                snapshot: Some(
-                    self.snapshot()
-                        .unwrap_or_else(|error| self.error_snapshot(error.to_string())),
-                ),
+                snapshot: if quiet {
+                    None
+                } else {
+                    Some(
+                        self.snapshot()
+                            .unwrap_or_else(|error| self.error_snapshot(error.to_string())),
+                    )
+                },
                 value,
                 error: None,
             },
             Err(error) => {
-                self.status = error.to_string();
+                if !quiet {
+                    self.status = error.to_string();
+                }
                 Response {
                     ok: false,
-                    snapshot: self.snapshot().ok(),
+                    snapshot: if quiet { None } else { self.snapshot().ok() },
                     value: None,
                     error: Some(error.to_string()),
                 }
@@ -100,7 +220,33 @@ impl AppCore {
                 self.status = "Диалог удалён".to_owned();
             }
             Command::AcceptContact { user_id } => {
-                self.update_contact(&user_id, |c| c.pending_approval = false)?
+                self.update_contact(&user_id, |c| c.pending_approval = false)?;
+                // Принятие диалога подтверждается квитанциями на всё уже полученное.
+                // Вместе с ними собеседник получает наш личный обратный адрес — до этого
+                // момента он мог писать только короткий текст в публичный ящик.
+                let conversation = conversation_id(&self.identity.public.user_id, &user_id);
+                let incoming: Vec<String> = self
+                    .store
+                    .messages(&conversation)?
+                    .into_iter()
+                    .rev()
+                    .filter(|message| !message.outgoing && !message.deleted)
+                    .take(20)
+                    .map(|message| message.event_id)
+                    .collect();
+                for target_event_id in incoming {
+                    self.queue_event(
+                        &user_id,
+                        &format!("evt1-{}", random_hex(16)),
+                        KIND_RECEIPT_DELIVERY,
+                        &TargetPayload {
+                            version: PROTOCOL_VERSION,
+                            target_event_id,
+                        },
+                    )?;
+                }
+                self.deliver_now();
+                self.status = "Диалог принят".to_owned();
             }
             Command::VerifyContact { user_id, verified } => {
                 self.update_contact(&user_id, |c| c.fingerprint_verified = verified)?
@@ -173,9 +319,21 @@ impl AppCore {
                 }
                 message.text = text.trim().to_owned();
                 message.edited = true;
-                message.delivered = false;
                 self.store.save_message(&message)?;
-                self.status = "Изменение сохранено в outbox".to_owned();
+                if let Some(user_id) = self.peer_of(&message)? {
+                    self.queue_event(
+                        &user_id,
+                        &format!("evt1-{}", random_hex(16)),
+                        KIND_EDIT,
+                        &EditPayload {
+                            version: PROTOCOL_VERSION,
+                            target_event_id: message.event_id.clone(),
+                            text: message.text.clone(),
+                        },
+                    )?;
+                }
+                self.deliver_now();
+                self.status = "Изменение отправлено".to_owned();
             }
             Command::DeleteMessages { event_ids } => {
                 for event_id in event_ids {
@@ -184,10 +342,36 @@ impl AppCore {
                         message.deleted = true;
                         message.text.clear();
                         message.attachment = None;
-                        message.delivered = false;
                         self.store.save_message(&message)?;
+                        if let Some(user_id) = self.peer_of(&message)? {
+                            self.queue_event(
+                                &user_id,
+                                &format!("evt1-{}", random_hex(16)),
+                                KIND_DELETE,
+                                &TargetPayload {
+                                    version: PROTOCOL_VERSION,
+                                    target_event_id: message.event_id.clone(),
+                                },
+                            )?;
+                        }
                     }
                 }
+                self.deliver_now();
+            }
+            Command::SetMessagePinned { event_id, pinned } => {
+                let mut message = self.require_message(&event_id)?;
+                if message.deleted {
+                    return Err(CoreError::InvalidInput(
+                        "Удалённое сообщение нельзя закрепить".to_owned(),
+                    ));
+                }
+                message.pinned = pinned;
+                self.store.save_message(&message)?;
+                self.status = if pinned {
+                    "Сообщение закреплено".to_owned()
+                } else {
+                    "Сообщение откреплено".to_owned()
+                };
             }
             Command::React {
                 event_ids,
@@ -200,23 +384,59 @@ impl AppCore {
                 for event_id in event_ids {
                     let mut message = self.require_message(&event_id)?;
                     if !message.deleted {
-                        if message.reactions.contains(&reaction) {
-                            message.reactions.retain(|v| v != &reaction);
-                        } else {
+                        let active = !message.reactions.contains(&reaction);
+                        if active {
                             message.reactions.push(reaction.clone());
+                        } else {
+                            message.reactions.retain(|v| v != &reaction);
                         }
-                        message.delivered = false;
                         self.store.save_message(&message)?;
+                        if let Some(user_id) = self.peer_of(&message)? {
+                            self.queue_event(
+                                &user_id,
+                                &format!("evt1-{}", random_hex(16)),
+                                KIND_REACTION,
+                                &ReactionPayload {
+                                    version: PROTOCOL_VERSION,
+                                    target_event_id: message.event_id.clone(),
+                                    reaction: reaction.clone(),
+                                    active,
+                                },
+                            )?;
+                        }
                     }
                 }
+                self.deliver_now();
             }
             Command::MarkRead { user_id } => {
                 let conversation = conversation_id(&self.identity.public.user_id, &user_id);
+                let accepted = self
+                    .store
+                    .contact(&user_id)?
+                    .is_some_and(|contact| !contact.pending_approval);
+                let mut receipts = Vec::new();
                 for mut message in self.store.messages(&conversation)? {
                     if !message.outgoing && !message.read {
                         message.read = true;
                         self.store.save_message(&message)?;
+                        receipts.push(message.event_id.clone());
                     }
+                }
+                // Квитанция о прочтении уходит только по принятому диалогу: неотвеченный
+                // запрос не должен подтверждать отправителю, что его читают.
+                if accepted {
+                    for target in receipts {
+                        self.queue_event(
+                            &user_id,
+                            &format!("evt1-{}", random_hex(16)),
+                            KIND_RECEIPT_READ,
+                            &TargetPayload {
+                                version: PROTOCOL_VERSION,
+                                target_event_id: target,
+                            },
+                        )?;
+                    }
+                    self.deliver_now();
                 }
                 if let Some(contact) = self.store.contact(&user_id)? {
                     if contact.manual_unread {
@@ -306,48 +526,190 @@ impl AppCore {
                 mime_type,
                 caption,
                 reply_to_event_id,
+                kind,
+                width,
+                height,
+                duration_milliseconds,
+                thumbnail_base64,
             } => {
-                let bytes = fs::read(&path)?;
-                if bytes.len() > 32 * 1024 * 1024 {
-                    return Err(CoreError::InvalidInput("Файл больше 32 МБ".to_owned()));
-                }
-                let attachment_id = format!("att1-{}", random_hex(16));
-                let encrypted = self.store.encrypt_bytes(&bytes)?;
-                let directory = self.store.app_dir.join("local-first").join("attachments");
-                fs::create_dir_all(&directory)?;
-                let target = directory.join(format!("{attachment_id}.bin"));
-                fs::write(&target, encrypted)?;
-                let name = Path::new(&path)
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .unwrap_or("attachment")
-                    .to_owned();
-                let attachment = Attachment {
-                    attachment_id,
-                    file_name: name,
-                    mime_type,
-                    size: bytes.len() as u64,
-                    local_path: target.to_string_lossy().into_owned(),
-                };
+                let (attachment, progress) = self.prepare_attachment(
+                    &path,
+                    &mime_type,
+                    kind,
+                    width,
+                    height,
+                    duration_milliseconds,
+                    thumbnail_base64,
+                )?;
+                media::encrypt_file(
+                    self.store.vault_key(),
+                    Path::new(&path),
+                    Path::new(&attachment.local_path),
+                    &progress,
+                )?;
+                let manifest = self.try_upload_attachment(&attachment, &progress);
                 self.send_text(
                     &user_id,
                     caption.as_deref().unwrap_or(""),
-                    Some(attachment),
+                    Some((attachment, manifest)),
                     reply_to_event_id,
                 )?;
+            }
+            Command::StartAttachment {
+                user_id,
+                path,
+                mime_type,
+                caption,
+                reply_to_event_id,
+                kind,
+                width,
+                height,
+                duration_milliseconds,
+                thumbnail_base64,
+            } => {
+                // Контакт проверяется сразу: незачем шифровать 300 МБ, чтобы потом отказать.
+                let contact = self
+                    .store
+                    .contact(&user_id)?
+                    .ok_or_else(|| CoreError::InvalidInput("Контакт не найден".to_owned()))?;
+                if contact.pending_approval {
+                    return Err(CoreError::InvalidInput(
+                        "Файлы доступны после принятия контакта".to_owned(),
+                    ));
+                }
+                let (attachment, progress) = self.prepare_attachment(
+                    &path,
+                    &mime_type,
+                    kind,
+                    width,
+                    height,
+                    duration_milliseconds,
+                    thumbnail_base64,
+                )?;
+                let source = PathBuf::from(&path);
+                let target = PathBuf::from(&attachment.local_path);
+                let key = *self.store.vault_key();
+                // Адрес Node узнаём заранее, но офлайн это не приговор: файл зашифруется
+                // локально, а выгрузка произойдёт при первой же связи.
+                let node = self.require_node().ok();
+                let slot: Arc<Mutex<Option<AttachmentManifest>>> = Arc::new(Mutex::new(None));
+                let worker_slot = Arc::clone(&slot);
+                let upload = attachment.clone();
+                let job_id = self.spawn_media_job(
+                    progress,
+                    Some(PendingAttachment {
+                        user_id,
+                        caption: caption.unwrap_or_default(),
+                        reply_to_event_id,
+                        attachment,
+                        manifest: slot,
+                    }),
+                    move |progress| {
+                        media::encrypt_file(&key, &source, &target, progress)?;
+                        let Some(node) = node else {
+                            return Ok(());
+                        };
+                        let manifest = delivery::upload_attachment(
+                            &Network::new()?,
+                            &node,
+                            &key,
+                            &upload,
+                            progress,
+                        )?;
+                        if let Ok(mut value) = worker_slot.lock() {
+                            *value = Some(manifest);
+                        }
+                        Ok(())
+                    },
+                );
+                self.status = "Файл готовится к отправке".to_owned();
+                return Ok(Some(json!({ "jobId": job_id })));
+            }
+            Command::FinishAttachment { job_id } => {
+                let job = self
+                    .media_jobs
+                    .remove(&job_id)
+                    .ok_or_else(|| CoreError::InvalidInput("Передача не найдена".to_owned()))?;
+                if job.state() == JOB_RUNNING {
+                    self.media_jobs.insert(job_id, job);
+                    return Err(CoreError::InvalidInput("Файл ещё готовится".to_owned()));
+                }
+                let failed = job.state() == JOB_FAILED;
+                let error = job.error();
+                let pending = job
+                    .pending
+                    .ok_or_else(|| CoreError::InvalidInput("Это не отправка файла".to_owned()))?;
+                if failed {
+                    fs::remove_file(&pending.attachment.local_path).ok();
+                    return Err(CoreError::InvalidInput(error));
+                }
+                let manifest = pending.manifest.lock().ok().and_then(|value| value.clone());
+                self.send_text(
+                    &pending.user_id,
+                    &pending.caption,
+                    Some((pending.attachment, manifest)),
+                    pending.reply_to_event_id,
+                )?;
+            }
+            Command::StartExportAttachment {
+                event_id,
+                destination_path,
+            } => {
+                let attachment = self.require_attachment(&event_id)?;
+                let source = PathBuf::from(attachment.local_path);
+                let target = PathBuf::from(destination_path);
+                let key = *self.store.vault_key();
+                let progress = Arc::new(Progress::default());
+                progress.total.store(attachment.size, Ordering::Relaxed);
+                let job_id = self.spawn_media_job(progress, None, move |progress| {
+                    media::decrypt_to_file(&key, &source, &target, progress).map(|_| ())
+                });
+                return Ok(Some(json!({ "jobId": job_id })));
+            }
+            Command::MediaJob { job_id } => {
+                let job = self
+                    .media_jobs
+                    .get(&job_id)
+                    .ok_or_else(|| CoreError::InvalidInput("Передача не найдена".to_owned()))?;
+                let value = job.describe(&job_id);
+                // Задача без заготовки сообщения (сохранение файла) больше никому не нужна.
+                if job.state() != JOB_RUNNING && job.pending.is_none() {
+                    self.media_jobs.remove(&job_id);
+                }
+                return Ok(Some(value));
+            }
+            Command::CancelMediaJob { job_id } => {
+                if let Some(job) = self.media_jobs.remove(&job_id) {
+                    job.progress.cancel();
+                    if let Some(pending) = job.pending {
+                        fs::remove_file(&pending.attachment.local_path).ok();
+                    }
+                    self.status = "Передача отменена".to_owned();
+                }
+            }
+            Command::AttachmentSource { event_id } => {
+                let attachment = self.require_attachment(&event_id)?;
+                return Ok(Some(json!({
+                    "path": attachment.local_path,
+                    "size": attachment.size,
+                    "mimeType": attachment.mime_type,
+                    "fileName": attachment.file_name,
+                    "width": attachment.width,
+                    "height": attachment.height,
+                    "durationMilliseconds": attachment.duration_milliseconds,
+                })));
             }
             Command::ExportAttachment {
                 event_id,
                 destination_path,
             } => {
-                let message = self.require_message(&event_id)?;
-                let attachment = message
-                    .attachment
-                    .ok_or_else(|| CoreError::InvalidInput("В сообщении нет файла".to_owned()))?;
-                let value = self
-                    .store
-                    .decrypt_bytes(&fs::read(attachment.local_path)?)?;
-                fs::write(destination_path, value)?;
+                let attachment = self.require_attachment(&event_id)?;
+                media::decrypt_to_file(
+                    self.store.vault_key(),
+                    Path::new(&attachment.local_path),
+                    Path::new(&destination_path),
+                    &Progress::default(),
+                )?;
                 self.status = "Файл сохранён".to_owned();
             }
             Command::CreateBackup { path, passphrase } => {
@@ -495,9 +857,17 @@ impl AppCore {
             manual_unread: false,
         };
         self.store.save_contact(&contact)?;
-        self.selected_contact = Some(user_id);
+        self.selected_contact = Some(user_id.clone());
         self.store.set_selected_contact(&self.selected_contact)?;
-        self.status = "Защищённый диалог добавлен".to_owned();
+        // Адрес забираем сразу: лучше честно сказать, что человек ещё не заходил в сеть,
+        // чем молча положить первое сообщение в очередь.
+        self.status = match self.network.routing(&descriptor, &user_id) {
+            Ok(Some(routing)) => {
+                self.store.save_peer_routing(&routing)?;
+                "Защищённый диалог добавлен".to_owned()
+            }
+            _ => "Диалог добавлен, но собеседник ещё ни разу не выходил в сеть".to_owned(),
+        };
         Ok(())
     }
 
@@ -518,7 +888,7 @@ impl AppCore {
         &mut self,
         user_id: &str,
         text: &str,
-        attachment: Option<Attachment>,
+        attachment: Option<(Attachment, Option<AttachmentManifest>)>,
         reply_to_event_id: Option<String>,
     ) -> Result<(), CoreError> {
         if text.trim().is_empty() && attachment.is_none() {
@@ -538,6 +908,10 @@ impl AppCore {
                 "Файлы доступны после принятия контакта".to_owned(),
             ));
         }
+        let (attachment, manifest) = match attachment {
+            Some((value, manifest)) => (Some(value), manifest),
+            None => (None, None),
+        };
         let message = Message {
             event_id: format!("evt1-{}", random_hex(16)),
             conversation_id: conversation_id(&self.identity.public.user_id, user_id),
@@ -549,17 +923,90 @@ impl AppCore {
             deleted: false,
             reactions: Vec::new(),
             delivered: false,
-            read: true,
+            // «Прочитано» у своего сообщения ставит квитанция собеседника, а не мы сами.
+            read: false,
+            pinned: false,
             attachment,
-            reply_to_event_id,
+            reply_to_event_id: reply_to_event_id.clone(),
             forwarded_from: None,
         };
         self.store.save_message(&message)?;
+        match (manifest, message.attachment.clone()) {
+            // Файл ещё не в хранилище: выгрузим его при первой связи и тогда же
+            // соберём событие — сообщение в истории уже есть.
+            (None, Some(attachment)) => {
+                self.store.save_pending_upload(&crate::store::PendingUpload {
+                    event_id: message.event_id.clone(),
+                    user_id: user_id.to_owned(),
+                    caption: message.text.clone(),
+                    reply_to_event_id,
+                    forwarded_from: None,
+                    attachment,
+                })?;
+            }
+            (Some(manifest), _) => {
+                self.store
+                    .save_event_manifest(&message.event_id, &manifest)?;
+                self.queue_event(
+                    user_id,
+                    &message.event_id,
+                    KIND_ATTACHMENT,
+                    &AttachmentPayload {
+                        version: PROTOCOL_VERSION,
+                        caption: message.text.clone(),
+                        manifest,
+                        reply_to_event_id,
+                        forwarded_from: None,
+                    },
+                )?;
+            }
+            (None, None) => self.queue_event(
+                user_id,
+                &message.event_id,
+                KIND_TEXT,
+                &TextPayload {
+                    version: PROTOCOL_VERSION,
+                    text: message.text.clone(),
+                    reply_to_event_id,
+                    forwarded_from: None,
+                },
+            )?,
+        }
         if !contact.draft.is_empty() {
             self.update_contact(user_id, |value| value.draft.clear())?;
         }
-        self.status = "Сообщение сохранено в outbox".to_owned();
+        self.deliver_now();
         Ok(())
+    }
+
+    /// Попытка отправить прямо сейчас: пользователю незачем ждать очередной цикл
+    /// синхронизации. Нет связи — событие останется в очереди и уйдёт позже.
+    fn deliver_now(&mut self) {
+        // Известно, что связи нет — не задерживаем интерфейс на таймауте запроса:
+        // фоновая синхронизация всё равно попробует ещё раз через несколько секунд.
+        if !self.online {
+            self.status = "Сообщение в очереди: нет связи с Node".to_owned();
+            return;
+        }
+        let Ok(settings) = self.store.settings() else {
+            return;
+        };
+        let Ok(node) = self.network.descriptor(
+            &settings.bootstrap_url,
+            settings.expected_node_id.as_deref(),
+        ) else {
+            self.status = "Сообщение в очереди: нет связи с Node".to_owned();
+            return;
+        };
+        if self.ensure_transport(&node).is_err() {
+            self.status = "Сообщение в очереди: адрес ещё не опубликован".to_owned();
+            return;
+        }
+        match self.flush_outbox(&node) {
+            Ok(count) if count > 0 => self.status = "Отправлено".to_owned(),
+            Ok(_) => {}
+            Err(error) => self.status = format!("Сообщение в очереди: {error}"),
+        }
     }
 
     /// Пересылка сообщений в другой диалог с сохранением автора оригинала.
@@ -589,6 +1036,17 @@ impl AppCore {
                     .map(|value| value.display_name)
                     .unwrap_or_else(|| short_id(&source.sender_user_id)),
             };
+            // Файл пересылается ссылкой на тот же объект в хранилище: выкладывать
+            // его заново незачем, ключ и без того есть у обеих сторон.
+            let manifest = match &source.attachment {
+                Some(_) => self.store.event_manifest(event_id)?,
+                None => None,
+            };
+            if source.attachment.is_some() && manifest.is_none() {
+                return Err(CoreError::InvalidInput(
+                    "Этот файл больше нельзя переслать: срок его хранения истёк".to_owned(),
+                ));
+            }
             let message = Message {
                 event_id: format!("evt1-{}", random_hex(16)),
                 conversation_id: conversation.clone(),
@@ -600,17 +1058,84 @@ impl AppCore {
                 deleted: false,
                 reactions: Vec::new(),
                 delivered: false,
-                read: true,
+                read: false,
+                pinned: false,
                 attachment: source.attachment.clone(),
                 reply_to_event_id: None,
-                forwarded_from: Some(author),
+                forwarded_from: Some(author.clone()),
             };
             self.store.save_message(&message)?;
+            match manifest {
+                Some(manifest) => {
+                    self.store
+                        .save_event_manifest(&message.event_id, &manifest)?;
+                    self.queue_event(
+                        user_id,
+                        &message.event_id,
+                        KIND_ATTACHMENT,
+                        &AttachmentPayload {
+                            version: PROTOCOL_VERSION,
+                            caption: message.text.clone(),
+                            manifest,
+                            reply_to_event_id: None,
+                            forwarded_from: Some(author),
+                        },
+                    )?;
+                }
+                None => self.queue_event(
+                    user_id,
+                    &message.event_id,
+                    KIND_TEXT,
+                    &TextPayload {
+                        version: PROTOCOL_VERSION,
+                        text: message.text.clone(),
+                        reply_to_event_id: None,
+                        forwarded_from: Some(author),
+                    },
+                )?,
+            }
         }
         self.selected_contact = Some(user_id.to_owned());
         self.store.set_selected_contact(&self.selected_contact)?;
+        self.deliver_now();
         self.status = "Сообщения пересланы".to_owned();
         Ok(())
+    }
+
+    /// Собеседник события: сообщения хранятся по диалогу, а адресуется отправка человеку.
+    fn peer_of(&self, message: &Message) -> Result<Option<String>, CoreError> {
+        Ok(self.store.contacts()?.into_iter().find_map(|contact| {
+            (conversation_id(&self.identity.public.user_id, &contact.user_id)
+                == message.conversation_id)
+                .then_some(contact.user_id)
+        }))
+    }
+
+    /// Выгрузка вложения «по возможности»: офлайн она просто откладывается.
+    fn try_upload_attachment(
+        &mut self,
+        attachment: &Attachment,
+        progress: &Progress,
+    ) -> Option<AttachmentManifest> {
+        let node = self.require_node().ok()?;
+        self.ensure_transport(&node).ok()?;
+        delivery::upload_attachment(
+            &self.network,
+            &node,
+            self.store.vault_key(),
+            attachment,
+            progress,
+        )
+        .ok()
+    }
+
+    /// Проверенный дескриптор текущего Node.
+    fn require_node(&mut self) -> Result<crate::network::NodeDescriptor, CoreError> {
+        let settings = self.store.settings()?;
+        self.network.descriptor(
+            &settings.bootstrap_url,
+            settings.expected_node_id.as_deref(),
+        )
     }
 
     fn sync(&mut self) -> Result<(), CoreError> {
@@ -639,11 +1164,30 @@ impl AppCore {
                 }
             }
         }
-        let pending = self.store.pending_messages()?.len();
-        self.status = if pending == 0 {
-            format!("Синхронизировано с {}", descriptor.name)
-        } else {
-            format!("{}: в outbox {} событий", descriptor.name, pending)
+
+        // Порядок важен: сначала свой адрес и предключи, иначе писать нам будет некуда;
+        // затем приём, и только потом отправка — ответ уходит уже с новым обратным адресом.
+        self.ensure_transport(&descriptor)?;
+        let download_failure = self.settle_downloads();
+        self.start_pending_downloads();
+        let received = self.fetch_inbox(&descriptor)?;
+        self.flush_outbox(&descriptor)?;
+
+        self.store.prune_seen_events()?;
+        let pending = self.store.outbox_length()?;
+        // Сорвавшаяся загрузка файла важнее бодрого «синхронизировано»: иначе
+        // пользователь видит в переписке вложение, которое не открывается.
+        if let Some(error) = download_failure {
+            self.status = format!("Файл не скачан: {error}");
+            return Ok(());
+        }
+        self.status = match (received, pending) {
+            (0, 0) => format!("Синхронизировано с {}", descriptor.name),
+            (0, pending) => format!("{}: в очереди {} событий", descriptor.name, pending),
+            (received, 0) => format!("Получено сообщений: {received}"),
+            (received, pending) => {
+                format!("Получено: {received}, в очереди: {pending}")
+            }
         };
         Ok(())
     }
@@ -746,6 +1290,137 @@ impl AppCore {
         settings.directory_sequence = sequence;
         self.store.save_settings(&settings)?;
         Ok(())
+    }
+
+    /// Предел на вложение: что разрешает Node, но не выше потолка для этого вида вложения.
+    /// Берётся из уже проверенного дескриптора, без обращения к сети, — отказ должен
+    /// прийти до того, как пользователь дождётся шифрования сотен мегабайт.
+    fn attachment_limit(&self, kind: MediaKind) -> u64 {
+        let own = match kind {
+            MediaKind::File => MAXIMUM_FILE_BYTES,
+            _ => MAXIMUM_MEDIA_BYTES,
+        };
+        let node = self
+            .store
+            .settings()
+            .ok()
+            .and_then(|settings| self.network.known_descriptor(&settings.bootstrap_url));
+        match node {
+            Some(descriptor) if descriptor.max_blob_bytes > 0 => {
+                (descriptor.max_blob_bytes as u64).min(own)
+            }
+            _ => own,
+        }
+    }
+
+    /// Готовит запись вложения и целевой файл до начала шифрования: клиенту нужно знать
+    /// имя, размер и превью сразу, ещё до того как большой файл будет обработан.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_attachment(
+        &self,
+        path: &str,
+        mime_type: &str,
+        kind: Option<MediaKind>,
+        width: u32,
+        height: u32,
+        duration_milliseconds: i64,
+        thumbnail_base64: Option<String>,
+    ) -> Result<(Attachment, Arc<Progress>), CoreError> {
+        let size = fs::metadata(path)?.len();
+        if size == 0 {
+            return Err(CoreError::InvalidInput("Файл пуст".to_owned()));
+        }
+        let resolved = kind.unwrap_or_else(|| MediaKind::from_mime(mime_type));
+        let limit = self.attachment_limit(resolved);
+        // Сверяем размер шифротекста, а не файла: предел Node задан для того, что он хранит.
+        if blobs::ciphertext_size(size) > limit {
+            return Err(CoreError::InvalidInput(match resolved {
+                MediaKind::File => format!("Файл больше {}", format_size(limit)),
+                _ => format!("Медиа больше {}", format_size(limit)),
+            }));
+        }
+        let attachment_id = format!("att1-{}", random_hex(16));
+        let directory = self.store.app_dir.join("local-first").join("attachments");
+        fs::create_dir_all(&directory)?;
+        let target = directory.join(format!("{attachment_id}.bin"));
+        let attachment = Attachment {
+            attachment_id,
+            file_name: Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("attachment")
+                .to_owned(),
+            mime_type: mime_type.to_owned(),
+            size,
+            local_path: target.to_string_lossy().into_owned(),
+            kind: kind.unwrap_or_else(|| MediaKind::from_mime(mime_type)),
+            width,
+            height,
+            duration_milliseconds,
+            thumbnail_base64,
+        };
+        let progress = Arc::new(Progress::default());
+        progress.total.store(size, Ordering::Relaxed);
+        Ok((attachment, progress))
+    }
+
+    /// Запускает работу с файлом в отдельном потоке: ядро под мьютексом остаётся свободным,
+    /// поэтому интерфейс продолжает отвечать и опрашивать прогресс.
+    fn spawn_media_job(
+        &mut self,
+        progress: Arc<Progress>,
+        pending: Option<PendingAttachment>,
+        work: impl FnOnce(&Progress) -> Result<(), CoreError> + Send + 'static,
+    ) -> String {
+        let job_id = format!("job1-{}", random_hex(8));
+        let state = Arc::new(AtomicU8::new(JOB_RUNNING));
+        let error = Arc::new(Mutex::new(String::new()));
+        let worker_progress = Arc::clone(&progress);
+        let worker_state = Arc::clone(&state);
+        let worker_error = Arc::clone(&error);
+        std::thread::spawn(move || {
+            let outcome = work(&worker_progress);
+            match outcome {
+                Ok(()) => worker_state.store(JOB_DONE, Ordering::Relaxed),
+                Err(failure) => {
+                    if let Ok(mut slot) = worker_error.lock() {
+                        *slot = failure.to_string();
+                    }
+                    worker_state.store(JOB_FAILED, Ordering::Relaxed);
+                }
+            }
+        });
+        self.media_jobs.insert(
+            job_id.clone(),
+            MediaJob {
+                progress,
+                state,
+                error,
+                pending,
+                attachment_id: None,
+            },
+        );
+        job_id
+    }
+
+    /// Фоновая загрузка входящего вложения: та же машинерия, что и у отправки,
+    /// но результат никуда не превращается — файл просто появляется на диске.
+    fn spawn_download_job(
+        &mut self,
+        progress: Arc<Progress>,
+        attachment_id: String,
+        work: impl FnOnce(&Progress) -> Result<(), CoreError> + Send + 'static,
+    ) {
+        let job_id = self.spawn_media_job(progress, None, work);
+        if let Some(job) = self.media_jobs.get_mut(&job_id) {
+            job.attachment_id = Some(attachment_id);
+        }
+    }
+
+    fn require_attachment(&self, event_id: &str) -> Result<Attachment, CoreError> {
+        self.require_message(event_id)?
+            .attachment
+            .ok_or_else(|| CoreError::InvalidInput("В сообщении нет файла".to_owned()))
     }
 
     fn require_message(&self, event_id: &str) -> Result<Message, CoreError> {
@@ -955,4 +1630,156 @@ fn read_secret_file(path: &str, magic: &[u8], passphrase: &str) -> Result<Vec<u8
         .map_err(|_| CoreError::Crypto("Неверный пароль или повреждён пакет".to_owned()));
     key.fill(0);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_core(root: &Path) -> AppCore {
+        let core = AppCore::open(root, [13u8; 32]).expect("ядро открывается");
+        // Тесты работают только с локальным хранилищем: адрес Node заведомо мёртвый,
+        // чтобы ни один прогон не постучался в настоящую сеть.
+        core.store
+            .save_settings(&crate::models::Settings {
+                bootstrap_url: "http://127.0.0.1:9".to_owned(),
+                expected_node_id: None,
+                ..Default::default()
+            })
+            .expect("настройки сохраняются");
+        // Сеть в тестах недоступна, поэтому контакт кладётся в хранилище напрямую.
+        core.store
+            .save_contact(&Contact {
+                user_id: "tt1-0123456789abcdef0123456789abcdef".to_owned(),
+                display_name: "Тест".to_owned(),
+                username: None,
+                about: None,
+                avatar_base64: None,
+                added_at_unix_milliseconds: 1,
+                fingerprint_verified: false,
+                pending_approval: false,
+                last_seen_unix_milliseconds: None,
+                pinned: false,
+                muted: false,
+                draft: String::new(),
+                manual_unread: false,
+            })
+            .expect("контакт сохраняется");
+        core
+    }
+
+    /// Отправка большого вложения идёт фоновой задачей: команда возвращает `jobId`
+    /// мгновенно, прогресс опрашивается отдельно, и только потом появляется сообщение.
+    #[test]
+    fn attachment_job_reports_progress_and_creates_message() {
+        let root = std::env::temp_dir().join(format!("turat-attach-{}", uuid::Uuid::new_v4()));
+        let mut core = open_core(&root);
+        let contact_id = "tt1-0123456789abcdef0123456789abcdef";
+
+        let source = root.join("clip.mp4");
+        fs::write(&source, vec![42u8; 700 * 1024]).expect("исходный файл");
+        let request = json!({
+            "command": "start_attachment",
+            "user_id": contact_id,
+            "path": source.to_string_lossy(),
+            "mime_type": "video/mp4",
+            "caption": "Проверка",
+            "kind": "video",
+            "width": 1280,
+            "height": 720,
+            "duration_milliseconds": 4200,
+            "thumbnail_base64": "AAAA",
+        })
+        .to_string();
+        let started: serde_json::Value = serde_json::from_str(&core.invoke(&request)).unwrap();
+        assert_eq!(started["ok"], true, "{started}");
+        let job_id = started["value"]["jobId"].as_str().unwrap().to_owned();
+
+        let mut state = String::new();
+        for _ in 0..600 {
+            let polled: serde_json::Value = serde_json::from_str(
+                &core.invoke(&format!(r#"{{"command":"media_job","job_id":"{job_id}"}}"#)),
+            )
+            .unwrap();
+            // Опрос прогресса нарочно не тащит за собой снимок всего состояния.
+            assert!(polled["snapshot"].is_null());
+            assert_eq!(polled["value"]["total"], 700 * 1024);
+            state = polled["value"]["state"].as_str().unwrap().to_owned();
+            if state != "running" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(state, "done");
+
+        let finished: serde_json::Value = serde_json::from_str(
+            &core.invoke(&format!(r#"{{"command":"finish_attachment","job_id":"{job_id}"}}"#)),
+        )
+        .unwrap();
+        assert_eq!(finished["ok"], true, "{finished}");
+
+        let selected: serde_json::Value = serde_json::from_str(&core.invoke(&format!(
+            r#"{{"command":"select_contact","user_id":"{contact_id}"}}"#
+        )))
+        .unwrap();
+        let message = &selected["snapshot"]["messages"][0];
+        assert_eq!(message["text"], "Проверка");
+        assert_eq!(message["attachment"]["kind"], "video");
+        assert_eq!(message["attachment"]["durationMilliseconds"], 4200);
+        assert_eq!(message["attachment"]["size"], 700 * 1024);
+        let event_id = message["eventId"].as_str().unwrap().to_owned();
+
+        // Потоковый читатель отдаёт ровно те же байты, что были отправлены, без полной расшифровки.
+        let source_info: serde_json::Value = serde_json::from_str(
+            &core.invoke(&format!(r#"{{"command":"attachment_source","event_id":"{event_id}"}}"#)),
+        )
+        .unwrap();
+        let stored = source_info["value"]["path"].as_str().unwrap().to_owned();
+        let mut reader = media::MediaReader::open(&[13u8; 32], Path::new(&stored)).unwrap();
+        assert_eq!(reader.length(), 700 * 1024);
+        let mut window = [0u8; 32];
+        assert_eq!(reader.read_at(600 * 1024, &mut window).unwrap(), 32);
+        assert!(window.iter().all(|value| *value == 42));
+
+        drop(reader);
+        drop(core);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Отмена убирает задачу и не оставляет полуготовый файл в хранилище вложений.
+    #[test]
+    fn cancelled_attachment_leaves_nothing_behind() {
+        let root = std::env::temp_dir().join(format!("turat-cancel-{}", uuid::Uuid::new_v4()));
+        let mut core = open_core(&root);
+        let source = root.join("big.bin");
+        fs::write(&source, vec![7u8; 8 * 1024 * 1024]).expect("исходный файл");
+        let started: serde_json::Value = serde_json::from_str(
+            &core.invoke(
+                &json!({
+                    "command": "start_attachment",
+                    "user_id": "tt1-0123456789abcdef0123456789abcdef",
+                    "path": source.to_string_lossy(),
+                    "mime_type": "application/octet-stream",
+                    "caption": null,
+                })
+                .to_string(),
+            ),
+        )
+        .unwrap();
+        let job_id = started["value"]["jobId"].as_str().unwrap().to_owned();
+        let cancelled: serde_json::Value = serde_json::from_str(
+            &core.invoke(&format!(r#"{{"command":"cancel_media_job","job_id":"{job_id}"}}"#)),
+        )
+        .unwrap();
+        assert_eq!(cancelled["ok"], true, "{cancelled}");
+        let missing: serde_json::Value = serde_json::from_str(
+            &core.invoke(&format!(r#"{{"command":"media_job","job_id":"{job_id}"}}"#)),
+        )
+        .unwrap();
+        assert_eq!(missing["ok"], false);
+        assert!(core.store.messages("любой").unwrap_or_default().is_empty());
+
+        drop(core);
+        fs::remove_dir_all(root).ok();
+    }
 }

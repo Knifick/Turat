@@ -172,6 +172,11 @@ function Write-ClientChecksums {
         @{ Name = 'Turat-win-x64.zip'; Path = $windowsZipArtifact },
         @{ Name = 'Turat.apk'; Path = $androidArtifact }
     )) {
+        if (-not (Test-Path -LiteralPath $item.Path)) {
+            # Иначе Get-FileHash вернёт $null, и падение выглядит как загадочное
+            # «You cannot call a method on a null-valued expression» без имени файла.
+            throw "Артефакт не найден: $($item.Path)"
+        }
         $existing[$item.Name] = (Get-FileHash -LiteralPath $item.Path -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     $preferredOrder = @('Turat.exe', 'Turat-win-x64.zip', 'Turat.apk', 'turattext-server.jar', 'TuratText-VPS-Node.zip')

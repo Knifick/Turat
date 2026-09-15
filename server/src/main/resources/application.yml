@@ -59,10 +59,11 @@ turattext:
     mailbox-max-ttl-hours: ${TURATTEXT_V2_MAILBOX_MAX_TTL_HOURS:336}
     mailbox-max-envelope-bytes: ${TURATTEXT_V2_MAILBOX_MAX_ENVELOPE_BYTES:524288}
     mailbox-max-envelopes: ${TURATTEXT_V2_MAILBOX_MAX_ENVELOPES:2000}
+    mailbox-max-wait-seconds: ${TURATTEXT_V2_MAILBOX_MAX_WAIT_SECONDS:25}
     registration-pow-bits: ${TURATTEXT_V2_REGISTRATION_POW_BITS:0}
     envelope-pow-bits: ${TURATTEXT_V2_ENVELOPE_POW_BITS:0}
     contact-pow-bits: ${TURATTEXT_V2_CONTACT_POW_BITS:0}
     contact-max-envelope-bytes: ${TURATTEXT_V2_CONTACT_MAX_ENVELOPE_BYTES:65536}
     contact-max-envelopes: ${TURATTEXT_V2_CONTACT_MAX_ENVELOPES:64}
-    blob-max-bytes: ${TURATTEXT_V2_BLOB_MAX_BYTES:104857600}
+    blob-max-bytes: ${TURATTEXT_V2_BLOB_MAX_BYTES:536870912}
     blob-max-chunk-bytes: ${TURATTEXT_V2_BLOB_MAX_CHUNK_BYTES:1048576}

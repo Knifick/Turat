@@ -65,6 +65,38 @@ pub struct Contact {
     pub manual_unread: bool,
 }
 
+/// Что именно лежит во вложении: от этого зависит, рисует клиент превью, плеер или карточку файла.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Image,
+    Video,
+    Audio,
+    File,
+}
+
+impl Default for MediaKind {
+    fn default() -> Self {
+        Self::File
+    }
+}
+
+impl MediaKind {
+    /// Клиент присылает свой `kind`, но если не прислал — тип выводится из MIME.
+    pub fn from_mime(mime: &str) -> Self {
+        let mime = mime.to_ascii_lowercase();
+        if mime.starts_with("image/") {
+            Self::Image
+        } else if mime.starts_with("video/") {
+            Self::Video
+        } else if mime.starts_with("audio/") {
+            Self::Audio
+        } else {
+            Self::File
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -73,6 +105,20 @@ pub struct Attachment {
     pub mime_type: String,
     pub size: u64,
     pub local_path: String,
+    /// Категория вложения: картинка, видео, аудио или обычный файл.
+    #[serde(default)]
+    pub kind: MediaKind,
+    /// Размер картинки или кадра видео — клиент резервирует место в пузыре до загрузки.
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// Длительность видео и аудио в миллисекундах.
+    #[serde(default)]
+    pub duration_milliseconds: i64,
+    /// Крошечный JPEG-кадр в base64: показывается мгновенно, пока грузится оригинал.
+    #[serde(default)]
+    pub thumbnail_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +135,8 @@ pub struct Message {
     pub reactions: Vec<String>,
     pub delivered: bool,
     pub read: bool,
+    #[serde(default)]
+    pub pinned: bool,
     pub attachment: Option<Attachment>,
     /// Ответ на сообщение: id цитируемого события в том же диалоге.
     #[serde(default)]
@@ -242,6 +290,10 @@ pub enum Command {
     DeleteMessages {
         event_ids: Vec<String>,
     },
+    SetMessagePinned {
+        event_id: String,
+        pinned: bool,
+    },
     React {
         event_ids: Vec<String>,
         reaction: String,
@@ -269,6 +321,56 @@ pub enum Command {
         caption: Option<String>,
         #[serde(default)]
         reply_to_event_id: Option<String>,
+        #[serde(default)]
+        kind: Option<MediaKind>,
+        #[serde(default)]
+        width: u32,
+        #[serde(default)]
+        height: u32,
+        #[serde(default)]
+        duration_milliseconds: i64,
+        #[serde(default)]
+        thumbnail_base64: Option<String>,
+    },
+    /// Запускает шифрование вложения в фоне и сразу возвращает `jobId`: интерфейс рисует
+    /// прогресс, а не замирает на большом видео.
+    StartAttachment {
+        user_id: String,
+        path: String,
+        mime_type: String,
+        caption: Option<String>,
+        #[serde(default)]
+        reply_to_event_id: Option<String>,
+        #[serde(default)]
+        kind: Option<MediaKind>,
+        #[serde(default)]
+        width: u32,
+        #[serde(default)]
+        height: u32,
+        #[serde(default)]
+        duration_milliseconds: i64,
+        #[serde(default)]
+        thumbnail_base64: Option<String>,
+    },
+    /// Превращает завершённую фоновую задачу в сообщение с вложением.
+    FinishAttachment {
+        job_id: String,
+    },
+    /// Сохранение вложения на диск в фоне — с тем же прогрессом, что и отправка.
+    StartExportAttachment {
+        event_id: String,
+        destination_path: String,
+    },
+    /// Состояние фоновой задачи: сколько байт готово, завершена ли, была ли ошибка.
+    MediaJob {
+        job_id: String,
+    },
+    CancelMediaJob {
+        job_id: String,
+    },
+    /// Путь к зашифрованному вложению — клиент открывает его потоковым читателем.
+    AttachmentSource {
+        event_id: String,
     },
     ExportAttachment {
         event_id: String,

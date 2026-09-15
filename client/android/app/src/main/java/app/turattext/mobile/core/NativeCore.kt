@@ -15,13 +15,32 @@ object NativeCore {
 
     private var handle: Long = 0
 
+    /**
+     * Время жизни хэндла. Ожидание конверта держит указатель десятки секунд и живёт в фоновом
+     * потоке, который не свернуть отменой корутины, — поэтому освобождение ядра откладывается
+     * до конца последнего такого ожидания.
+     */
+    private val lifetime = Any()
+    private var waiting = 0
+    private var disposed = false
+
     @Synchronized
     fun initialize(context: Context) {
-        if (handle != 0L) return
+        synchronized(lifetime) {
+            // Ядро могло пережить закрытие, если в этот момент кто-то ждал конверт.
+            if (handle != 0L) {
+                disposed = false
+                return
+            }
+        }
         val vaultKey = VaultKey.loadOrCreate(context.applicationContext)
-        handle = nativeCreate(context.filesDir.absolutePath, Base64.encodeToString(vaultKey, Base64.NO_WRAP))
-        require(handle != 0L) { "Rust core не удалось инициализировать" }
+        val created = nativeCreate(context.filesDir.absolutePath, Base64.encodeToString(vaultKey, Base64.NO_WRAP))
+        require(created != 0L) { "Rust core не удалось инициализировать" }
         vaultKey.fill(0)
+        synchronized(lifetime) {
+            handle = created
+            disposed = false
+        }
     }
 
     @Synchronized
@@ -32,13 +51,74 @@ object NativeCore {
 
     @Synchronized
     fun close() {
-        if (handle != 0L) nativeDestroy(handle)
-        handle = 0
+        synchronized(lifetime) {
+            disposed = true
+            releaseIfIdle()
+        }
+    }
+
+    /** Вызывать только под [lifetime]. */
+    private fun releaseIfIdle() {
+        if (disposed && waiting == 0 && handle != 0L) {
+            nativeDestroy(handle)
+            handle = 0
+        }
+    }
+
+    /**
+     * Открывает вложение для потокового чтения.
+     *
+     * Намеренно не под `@Synchronized`: плеер читает файл параллельно с обычными командами,
+     * и ждать очередной фоновой синхронизации ради следующего куска видео он не должен —
+     * своя блокировка на каждое вложение есть внутри Rust.
+     */
+    fun openMedia(path: String): Long {
+        val current = handle
+        if (current == 0L) return 0
+        return nativeMediaOpen(current, path)
+    }
+
+    fun mediaLength(media: Long): Long = if (media == 0L) -1 else nativeMediaLength(media)
+
+    /** Читает до [length] байт с позиции [offset]; 0 — конец файла, -1 — ошибка. */
+    fun readMedia(media: Long, offset: Long, buffer: ByteArray, length: Int): Int =
+        if (media == 0L) -1 else nativeMediaRead(media, offset, buffer, length)
+
+    fun closeMedia(media: Long) {
+        if (media != 0L) nativeMediaClose(media)
+    }
+
+    /**
+     * Ждёт входящий конверт на Node до [seconds] секунд: 1 — сообщение пришло, 0 — окно истекло,
+     * -1 — ждать негде или связь оборвалась.
+     *
+     * Намеренно не под `@Synchronized`: ожидание длится десятки секунд, и всё это время ядро
+     * обязано оставаться свободным для отправки и остальных действий пользователя.
+     */
+    fun waitForEnvelopes(seconds: Int): Int {
+        val current = synchronized(lifetime) {
+            if (disposed || handle == 0L) return -1
+            waiting += 1
+            handle
+        }
+        try {
+            return nativeWaitForEnvelopes(current, seconds)
+        } finally {
+            synchronized(lifetime) {
+                waiting -= 1
+                releaseIfIdle()
+            }
+        }
     }
 
     private external fun nativeCreate(appDir: String, vaultKeyBase64: String): Long
     private external fun nativeInvoke(handle: Long, request: String): String
     private external fun nativeDestroy(handle: Long)
+    private external fun nativeMediaOpen(handle: Long, path: String): Long
+    private external fun nativeMediaLength(media: Long): Long
+    private external fun nativeMediaRead(media: Long, offset: Long, buffer: ByteArray, length: Int): Int
+    private external fun nativeMediaClose(media: Long)
+    private external fun nativeWaitForEnvelopes(handle: Long, seconds: Int): Int
 }
 
 private object VaultKey {
