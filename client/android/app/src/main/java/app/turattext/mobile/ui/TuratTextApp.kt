@@ -105,6 +105,12 @@ private sealed interface Overlay {
     data object NewGroup : Overlay
     data object GroupInfo : Overlay
     data object AddMembers : Overlay
+    data object NewChannel : Overlay
+    data object ChannelInfo : Overlay
+    data object PickChannelAdmin : Overlay
+    data object InviteToChannel : Overlay
+    data object Discussion : Overlay
+    data class AdminRights(val userId: String, val displayName: String) : Overlay
     data class Forward(val eventIds: Set<String>) : Overlay
 }
 
@@ -175,6 +181,11 @@ fun TuratTextApp(
                             scope.launch { drawerState.close() }
                             newChatSubmitted = false
                             overlay = Overlay.NewGroup
+                        },
+                        onNewChannel = {
+                            scope.launch { drawerState.close() }
+                            newChatSubmitted = false
+                            overlay = Overlay.NewChannel
                         },
                         onSettings = { scope.launch { drawerState.close() }; overlay = Overlay.Settings },
                         onSync = { scope.launch { drawerState.close() }; actions.sync() },
@@ -254,7 +265,11 @@ fun TuratTextApp(
                         showBack = !wide,
                         onBack = onBack,
                         onOpenProfile = {
-                            overlay = if (state.selectedChat?.isGroup == true) Overlay.GroupInfo else Overlay.Profile
+                            overlay = when {
+                                state.selectedChat?.isChannel == true -> Overlay.ChannelInfo
+                                state.selectedChat?.isGroup == true -> Overlay.GroupInfo
+                                else -> Overlay.Profile
+                            }
                         },
                         onForward = { overlay = Overlay.Forward(it) },
                         modifier = modifier,
@@ -328,6 +343,109 @@ fun TuratTextApp(
                     newChatSubmitted = false
                     overlay = Overlay.NewGroup
                 },
+                onNewChannel = {
+                    newChatSubmitted = false
+                    overlay = Overlay.NewChannel
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.NewChannel) {
+            NewChannelScreen(
+                busy = busy,
+                error = if (newChatSubmitted && !busy) state.statusMessage else null,
+                onBack = { overlay = Overlay.None },
+                onCreate = { name, about ->
+                    newChatSubmitted = true
+                    actions.command(createChannelCommand(name, about)) { created ->
+                        if (created) overlay = Overlay.None
+                    }
+                },
+                onSubscribe = { link ->
+                    newChatSubmitted = true
+                    actions.command(CoreJson.command("subscribe_channel", "link" to link)) { sent ->
+                        if (sent) overlay = Overlay.None
+                    }
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.ChannelInfo && state.channel != null) {
+            ChannelInfoScreen(
+                state = state,
+                actions = actions,
+                onBack = { overlay = Overlay.None },
+                onInvite = { overlay = Overlay.InviteToChannel },
+                onAddAdmin = { overlay = Overlay.PickChannelAdmin },
+                onEditAdmin = { userId, name -> overlay = Overlay.AdminRights(userId, name) },
+                onPickDiscussion = { overlay = Overlay.Discussion },
+                onOpenChat = { chatId ->
+                    overlay = Overlay.None
+                    actions.selectContact(chatId)
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.PickChannelAdmin && state.channel != null) {
+            PickChannelAdminScreen(
+                state = state,
+                onBack = { overlay = Overlay.ChannelInfo },
+                onPick = { userId, name -> overlay = Overlay.AdminRights(userId, name) },
+            )
+        }
+        val rightsTarget = overlay as? Overlay.AdminRights
+        OverlayScreen(rightsTarget != null && state.channel != null) {
+            rightsTarget?.let { target ->
+                AdminRightsScreen(
+                    state = state,
+                    userId = target.userId,
+                    displayName = target.displayName,
+                    busy = busy,
+                    onBack = { overlay = Overlay.ChannelInfo },
+                    onSave = { rights, title ->
+                        val channelId = state.channel?.channelId ?: return@AdminRightsScreen
+                        actions.command(
+                            CoreJson.command(
+                                "set_channel_admin",
+                                "channel_id" to channelId,
+                                "user_id" to target.userId,
+                                "rights" to rights.toJson(),
+                                "title" to title,
+                            ),
+                        ) { saved -> if (saved) overlay = Overlay.ChannelInfo }
+                    },
+                )
+            }
+        }
+        OverlayScreen(overlay is Overlay.InviteToChannel && state.channel != null) {
+            InviteToChannelScreen(
+                state = state,
+                busy = busy,
+                onBack = { overlay = Overlay.ChannelInfo },
+                onInvite = { ids ->
+                    val channelId = state.channel?.channelId ?: return@InviteToChannelScreen
+                    actions.command(inviteToChannelCommand(channelId, ids)) { sent ->
+                        if (sent) overlay = Overlay.ChannelInfo
+                    }
+                },
+            )
+        }
+        OverlayScreen(overlay is Overlay.Discussion && state.channel != null) {
+            DiscussionPickerScreen(
+                state = state,
+                onBack = { overlay = Overlay.ChannelInfo },
+                onPick = { groupId ->
+                    val channelId = state.channel?.channelId ?: return@DiscussionPickerScreen
+                    actions.command(
+                        CoreJson.command("link_discussion_group", "channel_id" to channelId, "group_id" to groupId),
+                    ) { linked -> if (linked) overlay = Overlay.ChannelInfo }
+                },
+            )
+        }
+        // Комментарии открывает ядро: ветка живёт в снимке, пока её не закроют.
+        val thread = state.channel?.threadPostEventId?.takeIf { state.selectedContactId == state.channel.channelId }
+        OverlayScreen(thread != null && overlay == Overlay.None) {
+            CommentsScreen(
+                state = state,
+                actions = actions,
+                onBack = { actions.command(CoreJson.command("open_comments", "post_event_id" to null), null) },
             )
         }
         OverlayScreen(overlay is Overlay.NewGroup) {
@@ -443,8 +561,14 @@ fun TuratTextApp(
         overlay = when (overlay) {
             is Overlay.Themes -> Overlay.Settings
             is Overlay.AddMembers -> Overlay.GroupInfo
+            is Overlay.PickChannelAdmin, is Overlay.AdminRights,
+            is Overlay.InviteToChannel, is Overlay.Discussion -> Overlay.ChannelInfo
             else -> Overlay.None
         }
+    }
+    val threadOpen = state.channel?.threadPostEventId != null && state.selectedContactId == state.channel.channelId
+    BackHandler(enabled = overlay == Overlay.None && threadOpen) {
+        actions.command(CoreJson.command("open_comments", "post_event_id" to null), null)
     }
 }
 

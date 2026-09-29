@@ -72,7 +72,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.turattext.mobile.R
 import app.turattext.mobile.model.AppSnapshot
+import app.turattext.mobile.model.ChannelInfo
 import app.turattext.mobile.model.Contact
+import app.turattext.mobile.model.CoreJson
 import app.turattext.mobile.model.MediaKind
 import app.turattext.mobile.model.Message
 import app.turattext.mobile.model.PendingUpload
@@ -170,10 +172,17 @@ fun ConversationPane(
     val clipboard = LocalClipboardManager.current
     val chat = state.selectedChat
     val isGroup = chat?.isGroup == true
+    val isChannel = chat?.isChannel == true
+    val channel = state.channel?.takeIf { isChannel && it.channelId == contact.userId }
     val canWrite = chat?.canWrite != false
     val mine = remember(uploads, contact.userId) { uploads.filter { it.userId == contact.userId } }
-    val feed = remember(state.messages, mine, isGroup) { buildFeed(state.messages, mine, isGroup) }
+    // Посты канала стоят слева у всех, в том числе у администраторов, — как в Telegram.
+    val feed = remember(state.messages, mine, isGroup, isChannel) {
+        val shown = if (isChannel) state.messages.map { it.copy(outgoing = false) } else state.messages
+        buildFeed(shown, mine, isGroup || isChannel)
+    }
     val subtitle = when {
+        isChannel -> channelSubtitle(chat, channel)
         chat == null || !chat.isGroup -> presenceOf(contact)
         chat.groupLeft -> "вы не участник группы"
         contact.pending -> "приглашение в группу"
@@ -250,6 +259,7 @@ fun ConversationPane(
                         contact = contact,
                         subtitle = subtitle,
                         isGroup = isGroup,
+                        isChannel = isChannel,
                         showBack = showBack,
                         onBack = onBack,
                         onOpenProfile = onOpenProfile,
@@ -258,14 +268,17 @@ fun ConversationPane(
                         onClearHistory = { actions.clearHistory(contact.userId) },
                         onMute = { actions.setMuted(contact.userId, !contact.muted) },
                         onDeleteChat = {
-                            if (isGroup) confirmGroupDelete = true else actions.deleteContact(contact.userId)
+                            if (isGroup || isChannel) confirmGroupDelete = true else actions.deleteContact(contact.userId)
                         },
                     )
                 } else {
                     SelectionBar(
                         count = selected.size,
                         canEdit = selected.size == 1 &&
-                            state.messages.any { it.eventId == selected.first() && it.outgoing && !it.deleted },
+                            state.messages.any {
+                                it.eventId == selected.first() && !it.deleted && !it.service &&
+                                    (it.outgoing || channel?.canEditMessages == true)
+                            },
                         onClear = { selected.clear() },
                         onCopy = {
                             val text = state.messages.filter { it.eventId in selected && !it.deleted }
@@ -290,6 +303,9 @@ fun ConversationPane(
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         ServicePill(
                             when {
+                                isChannel && channel?.awaitingState == true -> "Ждём ответа администратора канала"
+                                isChannel && contact.pending -> "Вас пригласили в канал"
+                                isChannel -> "Здесь будут посты канала"
                                 contact.pending && isGroup -> "Вас пригласили в группу"
                                 contact.pending -> "Собеседник ждёт вашего ответа"
                                 else -> "Сообщения защищены сквозным шифрованием"
@@ -329,6 +345,11 @@ fun ConversationPane(
                                 onOpenMedia = { viewing = item.message },
                                 onSaveAttachment = { actions.saveAttachment(item.message) },
                                 onCancelTransfer = { downloads[item.message.eventId]?.let { actions.cancelTransfer(it.jobId) } },
+                                channel = channel,
+                                onOpenComments = { postId ->
+                                    actions.command(CoreJson.command("open_comments", "post_event_id" to postId), null)
+                                },
+                                onReact = { postId, reaction -> actions.react(setOf(postId), reaction) },
                             )
 
                             is FeedItem.Uploading -> UploadRow(
@@ -347,7 +368,7 @@ fun ConversationPane(
 
             if (selected.isNotEmpty()) {
                 SelectionActionsBar(
-                    canReply = canWrite && selected.size == 1 &&
+                    canReply = canWrite && !isChannel && selected.size == 1 &&
                         state.messages.any { it.eventId == selected.first() && !it.deleted },
                     onReply = {
                         replyToId = selected.single()
@@ -362,6 +383,8 @@ fun ConversationPane(
             } else if (contact.pending) {
                 PendingBar(
                     text = when {
+                        isChannel && channel?.invitedByName != null -> "${channel.invitedByName} приглашает вас в канал"
+                        isChannel -> "Вас пригласили в канал"
                         !isGroup -> "Этот пользователь хочет начать переписку"
                         state.group?.invitedByName != null -> "${state.group.invitedByName} приглашает вас в группу"
                         else -> "Вас пригласили в группу"
@@ -369,6 +392,8 @@ fun ConversationPane(
                     onAccept = { actions.acceptContact(contact.userId) },
                     onReject = { actions.rejectContact(contact.userId) },
                 )
+            } else if (isChannel && !canWrite) {
+                ChannelFooter(chat, channel, actions, onDelete = { confirmGroupDelete = true })
             } else if (chat?.groupLeft == true) {
                 GroupLeftBar(onDelete = { confirmGroupDelete = true })
             } else {
@@ -391,6 +416,7 @@ fun ConversationPane(
                     }
                     Composer(
                         draft = draft,
+                        placeholder = if (isChannel) "Опубликовать пост" else "Отправить сообщение",
                         onDraftChange = { draft = it },
                         onAttach = actions.pickAttachment,
                         onSend = ::submit,
@@ -518,6 +544,7 @@ private fun ConversationHeader(
     contact: Contact,
     subtitle: String,
     isGroup: Boolean,
+    isChannel: Boolean,
     showBack: Boolean,
     onBack: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -582,15 +609,31 @@ private fun ConversationHeader(
             }
             DropdownMenu(menuOpen, { onMenu(false) }) {
                 MenuRow(
-                    if (isGroup) R.drawable.ic_group else R.drawable.ic_person,
-                    if (isGroup) "О группе" else "Профиль",
+                    when {
+                        isChannel -> R.drawable.ic_channel
+                        isGroup -> R.drawable.ic_group
+                        else -> R.drawable.ic_person
+                    },
+                    when {
+                        isChannel -> "О канале"
+                        isGroup -> "О группе"
+                        else -> "Профиль"
+                    },
                 ) { onMenu(false); onOpenProfile() }
                 MenuRow(
                     if (contact.muted) R.drawable.ic_unmute else R.drawable.ic_mute,
                     if (contact.muted) "Включить звук" else "Отключить звук",
                 ) { onMenu(false); onMute() }
                 MenuRow(R.drawable.ic_broom, "Очистить историю") { onMenu(false); onClearHistory() }
-                MenuRow(R.drawable.ic_delete, if (isGroup) "Удалить группу" else "Удалить чат", danger = true) {
+                MenuRow(
+                    R.drawable.ic_delete,
+                    when {
+                        isChannel -> "Удалить канал"
+                        isGroup -> "Удалить группу"
+                        else -> "Удалить чат"
+                    },
+                    danger = true,
+                ) {
                     onMenu(false)
                     onDeleteChat()
                 }
@@ -721,6 +764,9 @@ private fun MessageRow(
     onOpenMedia: () -> Unit,
     onSaveAttachment: () -> Unit,
     onCancelTransfer: () -> Unit,
+    channel: ChannelInfo? = null,
+    onOpenComments: (String) -> Unit = {},
+    onReact: (String, String) -> Unit = { _, _ -> },
 ) {
     val colors = Telegram.colors
     val message = item.message
@@ -747,9 +793,9 @@ private fun MessageRow(
                     }
                 }
             }
-            Row(
+            Column(
                 Modifier.weight(1f),
-                horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start,
+                horizontalAlignment = if (message.outgoing) Alignment.End else Alignment.Start,
             ) {
                 MessageBubble(
                     message = message,
@@ -768,6 +814,16 @@ private fun MessageRow(
                         onLongClick = onToggle,
                     ),
                 )
+                val post = message.channelPost
+                if (channel != null && post != null && !message.deleted) {
+                    ChannelPostBar(
+                        post = post,
+                        commentsEnabled = channel.commentsEnabled,
+                        canReact = channel.canReact && !selectionMode,
+                        onComments = { onOpenComments(message.eventId) },
+                        onReact = { reaction -> onReact(message.eventId, reaction) },
+                    )
+                }
             }
         }
     }
@@ -1014,6 +1070,7 @@ private fun ComposerBanner(icon: Int, title: String, text: String, onCancel: () 
 @Composable
 private fun Composer(
     draft: String,
+    placeholder: String,
     onDraftChange: (String) -> Unit,
     onAttach: () -> Unit,
     onSend: () -> Unit,
@@ -1034,7 +1091,7 @@ private fun Composer(
             contentAlignment = Alignment.CenterStart,
         ) {
             if (draft.isEmpty()) {
-                Text("Отправить сообщение", color = colors.hint, fontSize = 16.sp)
+                Text(placeholder, color = colors.hint, fontSize = 16.sp)
             }
             BasicTextField(
                 value = draft,

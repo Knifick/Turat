@@ -75,6 +75,7 @@ fun DrawerContent(
     onOpenThemes: () -> Unit,
     onNewChat: () -> Unit,
     onNewGroup: () -> Unit,
+    onNewChannel: () -> Unit,
     onSettings: () -> Unit,
     onSync: () -> Unit,
 ) {
@@ -128,6 +129,7 @@ fun DrawerContent(
         }
         DrawerRow(R.drawable.ic_edit, "Новый диалог", onNewChat)
         DrawerRow(R.drawable.ic_group, "Новая группа", onNewGroup)
+        DrawerRow(R.drawable.ic_channel, "Новый канал", onNewChannel)
         DrawerRow(
             R.drawable.ic_sync,
             if (online) "Обновить сейчас" else "Подключиться к Node",
@@ -416,11 +418,15 @@ fun NewChatScreen(
     error: String?,
     onCreate: (String) -> Unit,
     onNewGroup: () -> Unit,
+    onNewChannel: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
     TelegramScreen("Новый диалог", onBack) {
         item {
             SectionRow(R.drawable.ic_group, "Создать группу", "до 100 участников · сквозное шифрование", onClick = onNewGroup)
+        }
+        item {
+            SectionRow(R.drawable.ic_channel, "Создать канал или подписаться", "посты для подписчиков · ссылка-приглашение", onClick = onNewChannel)
         }
         item {
             Text(
@@ -494,6 +500,7 @@ fun ForwardScreen(state: AppSnapshot, onBack: () -> Unit, onPick: (String) -> Un
                     )
                     Text(
                         if (chat.isGroup) membersLabel(chat.memberCount)
+                        else if (chat.isChannel) channelSubtitle(chat, null)
                         else chat.contact.username?.let { "@$it" } ?: shortId(chat.contact.userId),
                         color = colors.hint,
                         fontSize = 13.sp,

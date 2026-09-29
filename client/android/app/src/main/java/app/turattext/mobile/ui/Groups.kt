@@ -538,13 +538,25 @@ fun createGroupCommand(name: String, memberIds: List<String>): String = CoreJson
 @Composable
 fun GroupDeleteDialog(chat: Chat?, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     chat ?: return
-    ConfirmationDialog(
+    val confirmation = if (chat.isChannel) {
+        Confirmation(
+            "Удалить канал?",
+            when {
+                chat.channelRole == "owner" && !chat.groupLeft ->
+                    "Вы владелец: сначала передайте канал другому администратору или удалите его у всех в карточке канала."
+                !chat.groupLeft && !chat.contact.pending ->
+                    "Вы отпишетесь, а история канала будет удалена с этого устройства."
+                else -> "История канала будет удалена с этого устройства."
+            },
+            onConfirm,
+        )
+    } else {
         Confirmation(
             "Удалить группу?",
             if (chat.canWrite) "Вы покинете группу, а её история будет удалена с этого устройства."
             else "История группы будет удалена с этого устройства.",
             onConfirm,
-        ),
-        onDismiss,
-    )
+        )
+    }
+    ConfirmationDialog(confirmation, onDismiss)
 }

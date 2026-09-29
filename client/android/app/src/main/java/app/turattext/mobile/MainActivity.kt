@@ -1,6 +1,7 @@
 package app.turattext.mobile
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -38,9 +39,13 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 
 class MainActivity : ComponentActivity() {
+    /** Ссылка-приглашение в канал, с которой открыли приложение. */
+    private val channelLink = mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         drawEdgeToEdge()
+        if (savedInstanceState == null) channelLink.value = channelLinkOf(intent)
         setContent {
             val model: MainViewModel = viewModel()
             val theme by model.theme.collectAsStateWithLifecycle()
@@ -53,6 +58,13 @@ class MainActivity : ComponentActivity() {
                 val uploads by model.uploads.collectAsStateWithLifecycle()
                 val downloads by model.downloads.collectAsStateWithLifecycle()
                 val update by model.update.collectAsStateWithLifecycle()
+                val link by channelLink
+                LaunchedEffect(link, state.onboardingRequired) {
+                    val value = link ?: return@LaunchedEffect
+                    if (state.onboardingRequired) return@LaunchedEffect
+                    channelLink.value = null
+                    model.execute(CoreJson.command("subscribe_channel", "link" to value))
+                }
                 var pendingImport by remember { mutableStateOf<Pair<String, String>?>(null) }
                 var pendingExport by remember { mutableStateOf<Triple<String, String, String>?>(null) }
                 var pendingAttachmentSave by remember { mutableStateOf<String?>(null) }
@@ -119,6 +131,17 @@ class MainActivity : ComponentActivity() {
                         ?: encodeAvatar(this, uri, 112, 60)?.takeIf { it.length <= GroupAvatarLimit }
                     if (encoded == null) {
                         model.notify("Фото слишком детальное для группы — выберите другое")
+                        return@rememberLauncherForActivityResult
+                    }
+                    // Тот же выбор фото служит и каналу: его состояние тоже ездит к подписчикам.
+                    val channel = model.state.value.channel?.takeIf { it.channelId == groupId }
+                    if (channel != null) {
+                        model.execute(
+                            CoreJson.command(
+                                "update_channel_info", "channel_id" to groupId, "name" to channel.name,
+                                "about" to channel.about, "avatar_base64" to encoded,
+                            )
+                        )
                         return@rememberLauncherForActivityResult
                     }
                     val group = model.state.value.group?.takeIf { it.groupId == groupId }
@@ -236,6 +259,14 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        channelLinkOf(intent)?.let { channelLink.value = it }
+    }
+
+    private fun channelLinkOf(intent: Intent?): String? =
+        intent?.dataString?.takeIf { intent.action == Intent.ACTION_VIEW && it.startsWith("turat://channel/") }
 
     /** Приложение рисует фон под системными панелями, как Telegram. */
     private fun drawEdgeToEdge() {

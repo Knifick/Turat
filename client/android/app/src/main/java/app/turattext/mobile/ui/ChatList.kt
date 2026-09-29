@@ -261,6 +261,10 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
                             Icon(painterResource(R.drawable.ic_group), "Группа", Modifier.size(17.dp), colors.text)
                             Spacer(Modifier.width(4.dp))
                         }
+                        if (chat.isChannel) {
+                            Icon(painterResource(R.drawable.ic_channel), "Канал", Modifier.size(17.dp), colors.text)
+                            Spacer(Modifier.width(4.dp))
+                        }
                         Text(
                             contact.displayName,
                             Modifier.weight(1f, fill = false),
@@ -310,9 +314,11 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
                         when {
                             contact.draft.isNotBlank() -> contact.draft
                             contact.pending && chat.isGroup -> "Приглашение в группу"
+                            contact.pending && chat.isChannel -> "Приглашение в канал"
                             contact.pending -> "Хочет начать диалог"
                             chat.preview.isNotBlank() -> chat.preview
                             chat.isGroup -> membersLabel(chat.memberCount)
+                            chat.isChannel -> channelSubtitle(chat, null)
                             contact.username != null -> "@${contact.username}"
                             else -> shortId(contact.userId)
                         },
@@ -362,10 +368,24 @@ private fun ChatRow(chat: Chat, selected: Boolean, actions: AppActions, onClick:
                     actions.command(CoreJson.command("leave_group", "group_id" to contact.userId), null)
                 }
             }
-            ChatMenuItem(R.drawable.ic_delete, if (chat.isGroup) "Удалить группу" else "Удалить чат", danger = true) {
+            if (chat.isChannel && !chat.groupLeft && !contact.pending && chat.channelRole != "owner") {
+                ChatMenuItem(R.drawable.ic_close, "Отписаться", danger = true) {
+                    menu = false
+                    actions.command(CoreJson.command("leave_channel", "channel_id" to contact.userId), null)
+                }
+            }
+            ChatMenuItem(
+                R.drawable.ic_delete,
+                when {
+                    chat.isGroup -> "Удалить группу"
+                    chat.isChannel -> "Удалить канал"
+                    else -> "Удалить чат"
+                },
+                danger = true,
+            ) {
                 menu = false
-                // Удаление группы — это ещё и выход из неё, поэтому оно требует подтверждения.
-                if (chat.isGroup) confirmGroupDelete = true else actions.deleteContact(contact.userId)
+                // Удаление группы или канала — это ещё и выход из них, поэтому нужно подтверждение.
+                if (chat.isGroup || chat.isChannel) confirmGroupDelete = true else actions.deleteContact(contact.userId)
             }
         }
     }
