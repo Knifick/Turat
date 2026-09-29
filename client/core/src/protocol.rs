@@ -175,6 +175,35 @@ pub const KIND_GROUP_JOINED: &str = "group.joined";
 /// Ответ на `group.joined`: новый участник получает обратный адрес в ответ.
 pub const KIND_GROUP_ACK: &str = "group.ack";
 
+/// Полное новое состояние канала: администраторы, права, настройки.
+pub const KIND_CHANNEL_STATE: &str = "channel.state";
+/// Администратор приглашает контакт: к нему приходит состояние, а решает он сам.
+pub const KIND_CHANNEL_INVITE: &str = "channel.invite";
+/// Подписка: уходит администратору из ссылки или пригласившему.
+pub const KIND_CHANNEL_SUBSCRIBE: &str = "channel.subscribe";
+/// Отписка: уходит всем администраторам.
+pub const KIND_CHANNEL_LEAVE: &str = "channel.leave";
+/// Уведомление подписчику, что его удалили.
+pub const KIND_CHANNEL_REMOVED: &str = "channel.removed";
+/// Изменения списка подписчиков — только между администраторами.
+pub const KIND_CHANNEL_ROSTER: &str = "channel.roster";
+/// Пересылка чужих подписанных событий: история для нового подписчика и комментарии.
+/// Подписчики друг друга не знают, поэтому их голоса разносит администратор.
+pub const KIND_CHANNEL_RELAY: &str = "channel.relay";
+pub const KIND_CHANNEL_COMMENT: &str = "channel.comment";
+pub const KIND_CHANNEL_COMMENT_DELETE: &str = "channel.comment.delete";
+/// Подписчик прочитал посты — уходит их автору.
+pub const KIND_CHANNEL_VIEWS: &str = "channel.views";
+/// Автор рассылает счётчики своих постов и число подписчиков.
+pub const KIND_CHANNEL_STATS: &str = "channel.stats";
+
+/// Событие относится к каналу.
+pub fn is_channel_id(value: &str) -> bool {
+    value.strip_prefix("ttc1-").is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
 /// Событие относится к группе, а не к личному диалогу.
 pub fn is_group_id(value: &str) -> bool {
     value.strip_prefix("ttg1-").is_some_and(|hex| {
@@ -201,6 +230,97 @@ pub struct GroupStatePayload {
 pub struct GroupNoticePayload {
     pub version: i32,
     pub group_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelStatePayload {
+    pub version: i32,
+    pub state: crate::models::ChannelState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelNoticePayload {
+    pub version: i32,
+    pub channel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSubscribePayload {
+    pub version: i32,
+    pub channel_id: String,
+    /// Имя, под которым подписчика увидят администраторы: друг другу они незнакомы.
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelRosterPayload {
+    pub version: i32,
+    pub channel_id: String,
+    pub entries: Vec<crate::models::ChannelSubscriber>,
+}
+
+/// Чужое событие вместе с личностью его автора: подпись проверяется у получателя,
+/// а UserID — это хеш ключа, так что подменить автора пересылающий не может.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayedEvent {
+    pub identity: WireIdentity,
+    pub event: SignedProtocolEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelRelayPayload {
+    pub version: i32,
+    pub channel_id: String,
+    pub events: Vec<RelayedEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCommentPayload {
+    pub version: i32,
+    pub post_event_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_event_id: Option<String>,
+    pub author_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCommentDeletePayload {
+    pub version: i32,
+    pub post_event_id: String,
+    pub target_event_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelViewsPayload {
+    pub version: i32,
+    pub post_event_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPostStats {
+    pub event_id: String,
+    pub views: u32,
+    pub comments: u32,
+    pub reactions: Vec<crate::models::ReactionCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelStatsPayload {
+    pub version: i32,
+    pub subscriber_count: u32,
+    pub posts: Vec<ChannelPostStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

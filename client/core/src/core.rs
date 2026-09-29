@@ -14,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
 
+mod channels;
 mod delivery;
 mod groups;
 
@@ -30,7 +31,7 @@ use crate::{
     protocol::{
         AttachmentPayload, EditPayload, KIND_ATTACHMENT, KIND_DELETE, KIND_EDIT, KIND_REACTION,
         KIND_RECEIPT_DELIVERY, KIND_RECEIPT_READ, KIND_TEXT, PROTOCOL_VERSION, ReactionPayload,
-        TargetPayload, TextPayload, is_group_id,
+        TargetPayload, TextPayload, is_channel_id, is_group_id,
     },
     store::Store,
 };
@@ -166,6 +167,8 @@ pub struct AppCore {
     /// Адрес собственного ящика для фонового ожидания конверта. Наблюдатель работает вне
     /// замка ядра, поэтому ожидание не мешает пользователю отправлять сообщения.
     watch: Arc<Mutex<Option<MailboxWatch>>>,
+    /// Открытая ветка комментариев поста выбранного канала.
+    selected_thread: Option<String>,
 }
 
 impl AppCore {
@@ -187,6 +190,7 @@ impl AppCore {
             last_presence_poll_unix_milliseconds: 0,
             media_jobs: HashMap::new(),
             watch: Arc::new(Mutex::new(watch)),
+            selected_thread: None,
         })
     }
 
@@ -245,6 +249,9 @@ impl AppCore {
         match command {
             Command::Snapshot => {}
             Command::SelectContact { user_id } => {
+                if user_id != self.selected_contact {
+                    self.selected_thread = None;
+                }
                 self.selected_contact = user_id;
                 self.store.set_selected_contact(&self.selected_contact)?;
             }
@@ -263,6 +270,18 @@ impl AppCore {
             }
             Command::MarkRead { user_id } if is_group_id(&user_id) => {
                 self.mark_group_read(&user_id)?
+            }
+            // Удаление канала из списка — отписка; отказ от приглашения — тоже.
+            Command::DeleteContact { user_id } | Command::RejectContact { user_id }
+                if is_channel_id(&user_id) =>
+            {
+                self.leave_channel(&user_id, true)?
+            }
+            Command::AcceptContact { user_id } if is_channel_id(&user_id) => {
+                self.accept_channel_invite(&user_id)?
+            }
+            Command::MarkRead { user_id } if is_channel_id(&user_id) => {
+                self.mark_channel_read(&user_id)?
             }
             Command::DeleteContact { user_id } | Command::RejectContact { user_id } => {
                 self.store.delete_contact(&user_id)?;
@@ -335,6 +354,11 @@ impl AppCore {
             Command::ClearHistory { user_id } => {
                 let conversation = self.chat_conversation(&user_id);
                 self.store.clear_conversation(&conversation)?;
+                if is_channel_id(&user_id) {
+                    self.store
+                        .clear_conversations_with_prefix(&format!("{user_id}/"))?;
+                    self.selected_thread = None;
+                }
                 self.status = "История диалога очищена".to_owned();
             }
             Command::MarkUnread { user_id } => {
@@ -365,6 +389,10 @@ impl AppCore {
                     return Err(CoreError::InvalidInput("Сообщение пустое".to_owned()));
                 }
                 let mut message = self.require_message(&event_id)?;
+                if is_channel_id(&message.conversation_id) {
+                    self.edit_channel_post(message, &text)?;
+                    return Ok(None);
+                }
                 if !message.outgoing || message.deleted || message.service {
                     return Err(CoreError::InvalidInput(
                         "Сообщение нельзя изменить".to_owned(),
@@ -396,6 +424,10 @@ impl AppCore {
                 let me = self.identity.public.user_id.clone();
                 for event_id in event_ids {
                     let mut message = self.require_message(&event_id)?;
+                    if channels::channel_of_conversation(&message.conversation_id).is_some() {
+                        self.delete_channel_item(message)?;
+                        continue;
+                    }
                     if message.deleted || message.service {
                         continue;
                     }
@@ -460,6 +492,10 @@ impl AppCore {
                 let me = self.identity.public.user_id.clone();
                 for event_id in event_ids {
                     let mut message = self.require_message(&event_id)?;
+                    if channels::channel_of_conversation(&message.conversation_id).is_some() {
+                        self.react_channel_post(message, &reaction)?;
+                        continue;
+                    }
                     let chat = self.chat_of(&message)?;
                     let group = chat.as_deref().filter(|id| is_group_id(id));
                     if group.is_some_and(|group| self.ensure_group_writable(group).is_err()) {
@@ -928,13 +964,75 @@ impl AppCore {
                 },
             )?,
             Command::LeaveGroup { group_id } => self.leave_group(&group_id, false)?,
+            Command::CreateChannel {
+                name,
+                about,
+                avatar_base64,
+            } => {
+                let channel_id = self.create_channel(&name, &about, avatar_base64)?;
+                return Ok(Some(json!({ "channelId": channel_id })));
+            }
+            Command::SubscribeChannel { link } => {
+                let channel_id = self.subscribe_channel(&link)?;
+                return Ok(Some(json!({ "channelId": channel_id })));
+            }
+            Command::UpdateChannelInfo {
+                channel_id,
+                name,
+                about,
+                avatar_base64,
+            } => self.update_channel_info(&channel_id, &name, &about, avatar_base64)?,
+            Command::SetChannelSettings {
+                channel_id,
+                sign_posts,
+                comments_enabled,
+            } => self.set_channel_settings(&channel_id, sign_posts, comments_enabled)?,
+            Command::LinkDiscussionGroup {
+                channel_id,
+                group_id,
+            } => self.link_discussion_group(&channel_id, group_id)?,
+            Command::InviteToChannel {
+                channel_id,
+                user_ids,
+            } => self.invite_to_channel(&channel_id, &user_ids)?,
+            Command::SetChannelAdmin {
+                channel_id,
+                user_id,
+                rights,
+                title,
+            } => self.set_channel_admin(&channel_id, &user_id, rights, &title)?,
+            Command::RemoveChannelAdmin {
+                channel_id,
+                user_id,
+            } => self.remove_channel_admin(&channel_id, &user_id)?,
+            Command::TransferChannelOwnership {
+                channel_id,
+                user_id,
+            } => self.transfer_channel_ownership(&channel_id, &user_id)?,
+            Command::RemoveChannelSubscriber {
+                channel_id,
+                user_id,
+                ban,
+            } => self.remove_channel_subscriber(&channel_id, &user_id, ban)?,
+            Command::UnbanChannelSubscriber {
+                channel_id,
+                user_id,
+            } => self.unban_channel_subscriber(&channel_id, &user_id)?,
+            Command::LeaveChannel { channel_id } => self.leave_channel(&channel_id, false)?,
+            Command::CloseChannel { channel_id } => self.close_channel(&channel_id)?,
+            Command::OpenComments { post_event_id } => self.open_comments(post_event_id)?,
+            Command::SendComment {
+                post_event_id,
+                text,
+                reply_to_event_id,
+            } => self.send_comment(&post_event_id, &text, reply_to_event_id)?,
         }
         Ok(None)
     }
 
     /// Диалог, в котором хранятся сообщения чата: у группы это сам GroupID.
     fn chat_conversation(&self, chat_id: &str) -> String {
-        if is_group_id(chat_id) {
+        if is_group_id(chat_id) || is_channel_id(chat_id) {
             chat_id.to_owned()
         } else {
             conversation_id(&self.identity.public.user_id, chat_id)
@@ -946,6 +1044,21 @@ impl AppCore {
         chat_id: &str,
         update: impl FnOnce(&mut ChatFlags),
     ) -> Result<(), CoreError> {
+        if is_channel_id(chat_id) {
+            let mut record = self.channel_record(chat_id)?;
+            let mut flags = ChatFlags {
+                pinned: record.pinned,
+                muted: record.muted,
+                draft: std::mem::take(&mut record.draft),
+                manual_unread: record.manual_unread,
+            };
+            update(&mut flags);
+            record.pinned = flags.pinned;
+            record.muted = flags.muted;
+            record.draft = flags.draft;
+            record.manual_unread = flags.manual_unread;
+            return self.store.save_channel(&record);
+        }
         if is_group_id(chat_id) {
             let mut record = self.group_record(chat_id)?;
             let mut flags = ChatFlags {
@@ -978,6 +1091,9 @@ impl AppCore {
 
     /// Можно ли сейчас писать в чат. В непринятый личный диалог — только текст.
     fn ensure_chat_writable(&self, chat_id: &str, attachment: bool) -> Result<(), CoreError> {
+        if is_channel_id(chat_id) {
+            return self.ensure_channel_postable(chat_id).map(|_| ());
+        }
         if is_group_id(chat_id) {
             return self.ensure_group_writable(chat_id).map(|_| ());
         }
@@ -994,6 +1110,9 @@ impl AppCore {
     }
 
     fn chat_draft(&self, chat_id: &str) -> Result<String, CoreError> {
+        if is_channel_id(chat_id) {
+            return Ok(self.channel_record(chat_id)?.draft);
+        }
         if is_group_id(chat_id) {
             return Ok(self.group_record(chat_id)?.draft);
         }
@@ -1012,6 +1131,9 @@ impl AppCore {
         kind: &str,
         payload: &T,
     ) -> Result<(), CoreError> {
+        if is_channel_id(chat_id) {
+            return self.queue_channel_post(chat_id, event_id, kind, payload);
+        }
         if is_group_id(chat_id) {
             let record = self.ensure_group_writable(chat_id)?;
             let recipients = self.group_recipients(&record.state);
@@ -1022,6 +1144,20 @@ impl AppCore {
 
     /// Имя автора сообщения для подписи «переслано от» и ленты группы.
     fn sender_name_of(&self, message: &Message) -> Result<String, CoreError> {
+        // Пост канала пересылается от имени канала, комментарий — от имени автора.
+        if is_channel_id(&message.conversation_id) {
+            return Ok(self
+                .store
+                .channel(&message.conversation_id)?
+                .map(|record| record.state.name)
+                .unwrap_or_else(|| "Канал".to_owned()));
+        }
+        if channels::split_thread(&message.conversation_id).is_some() {
+            return Ok(message
+                .sender_name
+                .clone()
+                .unwrap_or_else(|| short_id(&message.sender_user_id)));
+        }
         if is_group_id(&message.conversation_id) {
             let record = self.store.group(&message.conversation_id)?;
             return Ok(self.member_display_name(
@@ -1149,6 +1285,7 @@ impl AppCore {
             service: false,
             reaction_marks: Vec::new(),
             sender_name: None,
+            channel_post: None,
         };
         self.store.save_message(&message)?;
         match (manifest, message.attachment.clone()) {
@@ -1233,7 +1370,20 @@ impl AppCore {
 
     /// Пересылка сообщений в другой диалог с сохранением автора оригинала.
     fn forward_messages(&mut self, event_ids: &[String], user_id: &str) -> Result<(), CoreError> {
-        if is_group_id(user_id) {
+        self.forward_into(event_ids, user_id)?;
+        self.selected_contact = Some(user_id.to_owned());
+        self.selected_thread = None;
+        self.store.set_selected_contact(&self.selected_contact)?;
+        self.deliver_now();
+        self.status = "Сообщения пересланы".to_owned();
+        Ok(())
+    }
+
+    /// Пересылка без смены открытого чата: ей же пост канала уходит в группу обсуждения.
+    fn forward_into(&mut self, event_ids: &[String], user_id: &str) -> Result<(), CoreError> {
+        if is_channel_id(user_id) {
+            self.ensure_channel_postable(user_id)?;
+        } else if is_group_id(user_id) {
             self.ensure_group_writable(user_id)?;
         } else {
             let target = self
@@ -1255,6 +1405,7 @@ impl AppCore {
             }
             let author = match source.forwarded_from.clone() {
                 Some(value) => value,
+                None if is_channel_id(&source.conversation_id) => self.sender_name_of(&source)?,
                 None if source.outgoing => own_name.clone(),
                 None => self.sender_name_of(&source)?,
             };
@@ -1288,6 +1439,7 @@ impl AppCore {
                 service: false,
                 reaction_marks: Vec::new(),
                 sender_name: None,
+                channel_post: None,
             };
             self.store.save_message(&message)?;
             match manifest {
@@ -1320,15 +1472,18 @@ impl AppCore {
                 )?,
             }
         }
-        self.selected_contact = Some(user_id.to_owned());
-        self.store.set_selected_contact(&self.selected_contact)?;
-        self.deliver_now();
-        self.status = "Сообщения пересланы".to_owned();
         Ok(())
     }
 
     /// Чат события: сообщения хранятся по диалогу, а адресуется отправка человеку или группе.
     fn chat_of(&self, message: &Message) -> Result<Option<String>, CoreError> {
+        if is_channel_id(&message.conversation_id) {
+            return Ok(self
+                .store
+                .channel(&message.conversation_id)?
+                .filter(|record| !record.hidden)
+                .map(|record| record.state.channel_id));
+        }
         if is_group_id(&message.conversation_id) {
             return Ok(self
                 .store
@@ -1403,6 +1558,9 @@ impl AppCore {
         let download_failure = self.settle_downloads();
         self.start_pending_downloads();
         let received = self.fetch_inbox(&descriptor)?;
+        if let Err(error) = self.broadcast_channel_stats() {
+            self.status = format!("Счётчики канала не разосланы: {error}");
+        }
         self.flush_outbox(&descriptor)?;
 
         self.store.prune_seen_events()?;
@@ -1665,7 +1823,22 @@ impl AppCore {
         let profile = self.store.profile()?;
         let chats = self.chats()?;
         let mut group = None;
+        let mut channel = None;
+        let mut comments = Vec::new();
         let messages = match self.selected_contact.as_deref() {
+            Some(channel_id) if is_channel_id(channel_id) => {
+                match self.store.channel(channel_id)?.filter(|record| !record.hidden) {
+                    Some(record) => {
+                        let view = self.channel_view(&record)?;
+                        if let Some(post) = &view.thread_post_event_id {
+                            comments = self.channel_comments(&record, post)?;
+                        }
+                        channel = Some(view);
+                        self.channel_feed(&record)?
+                    }
+                    None => Vec::new(),
+                }
+            }
             Some(group_id) if is_group_id(group_id) => {
                 match self.store.group(group_id)?.filter(|record| !record.hidden) {
                     Some(record) => {
@@ -1711,6 +1884,8 @@ impl AppCore {
             search_query: self.search_query.clone(),
             search_results: self.search_results()?,
             group,
+            channel,
+            comments,
         })
     }
 
@@ -1727,9 +1902,30 @@ impl AppCore {
             .filter(|record| !record.hidden)
             .map(|record| (record.state.group_id.clone(), record))
             .collect();
+        let channels: std::collections::HashMap<String, crate::models::ChannelRecord> = self
+            .store
+            .channels()?
+            .into_iter()
+            .filter(|record| !record.hidden)
+            .map(|record| (record.state.channel_id.clone(), record))
+            .collect();
         let mut hits = Vec::new();
         for message in self.store.search_messages(&self.search_query, 60)? {
             if message.service {
+                continue;
+            }
+            if let Some(channel_id) = channels::channel_of_conversation(&message.conversation_id) {
+                if let Some(record) = channels.get(channel_id) {
+                    hits.push(SearchHit {
+                        event_id: message.event_id,
+                        user_id: record.state.channel_id.clone(),
+                        display_name: record.state.name.clone(),
+                        avatar_base64: record.state.avatar_base64.clone(),
+                        text: message.text,
+                        created_at_unix_milliseconds: message.created_at_unix_milliseconds,
+                        outgoing: message.outgoing,
+                    });
+                }
                 continue;
             }
             if is_group_id(&message.conversation_id) {
@@ -1784,6 +1980,9 @@ impl AppCore {
                     member_count: 0,
                     group_role: None,
                     group_left: false,
+                    is_channel: false,
+                    channel_role: None,
+                    channel_can_post: false,
                 },
                 None => Chat {
                     preview: String::new(),
@@ -1798,6 +1997,9 @@ impl AppCore {
                     member_count: 0,
                     group_role: None,
                     group_left: false,
+                    is_channel: false,
+                    channel_role: None,
+                    channel_can_post: false,
                 },
             });
         }
@@ -1856,6 +2058,9 @@ impl AppCore {
                         member_count,
                         group_role,
                         group_left: record.left,
+                        is_channel: false,
+                        channel_role: None,
+                        channel_can_post: false,
                     }
                 }
                 None => Chat {
@@ -1871,8 +2076,17 @@ impl AppCore {
                     member_count,
                     group_role,
                     group_left: record.left,
+                    is_channel: false,
+                    channel_role: None,
+                    channel_can_post: false,
                 },
             });
+        }
+        for record in self.store.channels()? {
+            if record.hidden {
+                continue;
+            }
+            chats.push(self.channel_chat(&record)?);
         }
         chats.sort_by(|left, right| {
             right
@@ -1902,6 +2116,8 @@ impl AppCore {
             search_query: String::new(),
             search_results: Vec::new(),
             group: None,
+            channel: None,
+            comments: Vec::new(),
         }
     }
 }
@@ -2325,6 +2541,257 @@ mod tests {
         assert!(messages.iter().any(|message| message.service && message.text.contains("исключил(а) вас")));
         state.epoch = 4;
         assert!(!core.apply_group_event(&remote_event(&other, &group_id, KIND_TEXT, &TextPayload { text: "после исключения".to_owned(), version: PROTOCOL_VERSION, reply_to_event_id: None, forwarded_from: None })).unwrap());
+
+        drop(core);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Перекладывает очередь `from` в ядра получателей, как это сделала бы сеть, и
+    /// возвращает виды доставленных событий по получателям.
+    fn pump(from: &mut AppCore, peers: &mut [&mut AppCore]) -> Vec<(String, String)> {
+        let sender = crate::protocol::WireIdentity::from(&from.identity.public);
+        let jobs = from.store.due_outbox(10_000).unwrap();
+        let mut delivered = Vec::new();
+        for job in jobs {
+            from.store.complete_outbox(&job.job_id).unwrap();
+            let Some(peer) = peers
+                .iter_mut()
+                .find(|peer| peer.identity.public.user_id == job.user_id)
+            else {
+                continue;
+            };
+            assert!(job.event.verify(&sender), "подпись события {}", job.event.kind);
+            peer.store.mark_seen(&job.event.event_id).unwrap();
+            peer.apply_channel_event(&job.event, &sender).unwrap();
+            delivered.push((job.user_id.clone(), job.event.kind.clone()));
+        }
+        delivered
+    }
+
+    fn named_core(root: &Path, name: &str) -> AppCore {
+        let mut core = open_core(root);
+        call(&mut core, json!({"command":"save_profile","username":"","display_name":name,"about":"","avatar_base64":null}));
+        core
+    }
+
+    /// Канал целиком: подписка по ссылке, пост, просмотры, реакции, комментарии через
+    /// администратора, счётчики, права и удаление подписчика.
+    #[test]
+    fn channel_lifecycle_between_owner_and_subscribers() {
+        let base = std::env::temp_dir().join(format!("turat-channel-{}", uuid::Uuid::new_v4()));
+        let mut owner = named_core(&base.join("owner"), "Владелец");
+        let mut bob = named_core(&base.join("bob"), "Боб");
+        let mut carol = named_core(&base.join("carol"), "Кэрол");
+        let bob_id = bob.identity.public.user_id.clone();
+        let carol_id = carol.identity.public.user_id.clone();
+
+        let created = call(&mut owner, json!({"command":"create_channel","name":"Новости","about":"Главное за день"}));
+        assert_eq!(created["ok"], true, "{created}");
+        let channel_id = created["value"]["channelId"].as_str().unwrap().to_owned();
+        let view = &created["snapshot"]["channel"];
+        assert_eq!(view["myRole"], "owner");
+        assert_eq!(view["canPost"], true);
+        let link = view["inviteLink"].as_str().unwrap().to_owned();
+        let chat = created["snapshot"]["chats"].as_array().unwrap().iter()
+            .find(|chat| chat["userId"] == channel_id).cloned().unwrap();
+        assert_eq!(chat["isChannel"], true);
+        assert_eq!(chat["channelCanPost"], true);
+
+        // Пост до подписки: его новичок получит историей.
+        let early = call(&mut owner, json!({"command":"send_text","user_id":channel_id,"text":"Первый пост"}));
+        assert_eq!(early["ok"], true, "{early}");
+
+        for subscriber in [&mut bob, &mut carol] {
+            let subscribed = call(subscriber, json!({"command":"subscribe_channel","link":link}));
+            assert_eq!(subscribed["ok"], true, "{subscribed}");
+            assert_eq!(subscribed["snapshot"]["channel"]["awaitingState"], true);
+            assert_eq!(subscribed["snapshot"]["channel"]["canPost"], false);
+            pump(subscriber, &mut [&mut owner]);
+        }
+        let sent = pump(&mut owner, &mut [&mut bob, &mut carol]);
+        assert!(sent.contains(&(bob_id.clone(), "channel.state".to_owned())), "{sent:?}");
+        assert!(sent.contains(&(carol_id.clone(), "channel.relay".to_owned())), "{sent:?}");
+
+        let bob_view = call(&mut bob, json!({"command":"select_contact","user_id":channel_id}));
+        assert_eq!(bob_view["snapshot"]["channel"]["awaitingState"], false, "{bob_view}");
+        assert_eq!(bob_view["snapshot"]["channel"]["name"], "Новости");
+        // Число подписчиков Боб узнал в момент своей подписки — Кэрол пришла позже.
+        assert_eq!(bob_view["snapshot"]["channel"]["subscriberCount"], 1);
+        assert!(bob_view["snapshot"]["channel"]["subscribers"].as_array().unwrap().is_empty(),
+            "подписчик не видит других подписчиков");
+        let texts: Vec<String> = bob_view["snapshot"]["messages"].as_array().unwrap().iter()
+            .filter(|message| message["service"] == false)
+            .map(|message| message["text"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(texts, vec!["Первый пост"]);
+
+        let owner_view = call(&mut owner, json!({"command":"select_contact","user_id":channel_id}));
+        assert_eq!(owner_view["snapshot"]["channel"]["subscriberCount"], 2);
+        assert_eq!(owner_view["snapshot"]["channel"]["subscribers"].as_array().unwrap().len(), 2);
+
+        // Подписчик публиковать не может — ни у себя, ни подделкой события.
+        let refused = call(&mut bob, json!({"command":"send_text","user_id":channel_id,"text":"спам"}));
+        assert_eq!(refused["ok"], false);
+        let forged = bob.sign_event(&channel_id, "evt1-forged", KIND_TEXT,
+            &TextPayload { version: PROTOCOL_VERSION, text: "спам".to_owned(), reply_to_event_id: None, forwarded_from: None }).unwrap();
+        let bob_wire = crate::protocol::WireIdentity::from(&bob.identity.public);
+        assert!(!carol.apply_channel_event(&forged, &bob_wire).unwrap());
+
+        // Новый пост, просмотр и реакция возвращаются автору.
+        call(&mut owner, json!({"command":"send_text","user_id":channel_id,"text":"Второй пост"}));
+        pump(&mut owner, &mut [&mut bob, &mut carol]);
+        let bob_feed = call(&mut bob, json!({"command":"mark_read","user_id":channel_id}));
+        let post = bob_feed["snapshot"]["messages"].as_array().unwrap().iter()
+            .find(|message| message["text"] == "Второй пост").cloned().unwrap();
+        let post_id = post["eventId"].as_str().unwrap().to_owned();
+        call(&mut bob, json!({"command":"react","event_ids":[post_id],"reaction":"🔥"}));
+        let returned = pump(&mut bob, &mut [&mut owner]);
+        assert!(returned.iter().any(|(_, kind)| kind == "channel.views"), "{returned:?}");
+        assert!(returned.iter().any(|(_, kind)| kind == "message.reaction"), "{returned:?}");
+        let owner_feed = call(&mut owner, json!({"command":"snapshot"}));
+        let own_post = owner_feed["snapshot"]["messages"].as_array().unwrap().iter()
+            .find(|message| message["eventId"] == post_id).cloned().unwrap();
+        assert_eq!(own_post["channelPost"]["views"], 1);
+        assert_eq!(own_post["channelPost"]["reactions"][0]["reaction"], "🔥");
+        assert_eq!(own_post["channelPost"]["reactions"][0]["count"], 1);
+
+        // Комментарий подписчика уходит автору, а тот разносит его остальным.
+        let commented = call(&mut bob, json!({"command":"send_comment","post_event_id":post_id,"text":"Отличный пост"}));
+        assert_eq!(commented["ok"], true, "{commented}");
+        let to_owner = pump(&mut bob, &mut [&mut owner, &mut carol]);
+        assert_eq!(to_owner.len(), 1, "комментарий идёт только администратору: {to_owner:?}");
+        let relayed = pump(&mut owner, &mut [&mut bob, &mut carol]);
+        assert!(relayed.contains(&(carol_id.clone(), "channel.relay".to_owned())), "{relayed:?}");
+        assert!(!relayed.iter().any(|(user, _)| user == &bob_id), "автору комментарий не возвращается");
+        let thread = call(&mut carol, json!({"command":"open_comments","post_event_id":post_id}));
+        assert_eq!(thread["ok"], true, "{thread}");
+        let comments = thread["snapshot"]["comments"].as_array().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0]["text"], "Отличный пост");
+        assert_eq!(comments[0]["senderName"], "Боб");
+        assert_eq!(thread["snapshot"]["channel"]["threadPostEventId"], post_id);
+
+        // Счётчики автора доходят до подписчиков.
+        owner.broadcast_channel_stats().unwrap();
+        pump(&mut owner, &mut [&mut bob, &mut carol]);
+        let carol_feed = call(&mut carol, json!({"command":"open_comments","post_event_id":null}));
+        let seen = carol_feed["snapshot"]["messages"].as_array().unwrap().iter()
+            .find(|message| message["eventId"] == post_id).cloned().unwrap();
+        assert_eq!(seen["channelPost"]["views"], 1);
+        assert_eq!(seen["channelPost"]["comments"], 1);
+        assert_eq!(seen["channelPost"]["reactions"][0]["count"], 1);
+        assert_eq!(carol_feed["snapshot"]["channel"]["subscriberCount"], 2);
+
+        // Администратор с правом публикации: его пост принимают подписчики.
+        let appointed = call(&mut owner, json!({"command":"set_channel_admin","channel_id":channel_id,"user_id":bob_id,
+            "rights":{"postMessages":true},"title":"Редактор"}));
+        assert_eq!(appointed["ok"], true, "{appointed}");
+        let appointment = pump(&mut owner, &mut [&mut bob, &mut carol]);
+        assert!(appointment.contains(&(bob_id.clone(), "channel.roster".to_owned())), "{appointment:?}");
+        let bob_admin = call(&mut bob, json!({"command":"select_contact","user_id":channel_id}));
+        assert_eq!(bob_admin["snapshot"]["channel"]["myRole"], "admin");
+        assert_eq!(bob_admin["snapshot"]["channel"]["canPost"], true);
+        assert_eq!(bob_admin["snapshot"]["channel"]["canBan"], false);
+        let bob_post = call(&mut bob, json!({"command":"send_text","user_id":channel_id,"text":"От редактора"}));
+        assert_eq!(bob_post["ok"], true, "{bob_post}");
+        pump(&mut bob, &mut [&mut owner, &mut carol]);
+        let carol_texts = carol.store.messages(&channel_id).unwrap();
+        assert!(carol_texts.iter().any(|message| message.text == "От редактора"));
+        // Без права блокировки чужого подписчика не удалить.
+        let kick = call(&mut bob, json!({"command":"remove_channel_subscriber","channel_id":channel_id,"user_id":carol_id}));
+        assert_eq!(kick["ok"], false);
+
+        // Владелец удаляет подписчика: тот узнаёт об этом и больше ничего не получает.
+        let removed = call(&mut owner, json!({"command":"remove_channel_subscriber","channel_id":channel_id,"user_id":carol_id,"ban":true}));
+        assert_eq!(removed["ok"], true, "{removed}");
+        pump(&mut owner, &mut [&mut bob, &mut carol]);
+        let carol_view = call(&mut carol, json!({"command":"select_contact","user_id":channel_id}));
+        assert_eq!(carol_view["snapshot"]["channel"]["removed"], true);
+        call(&mut owner, json!({"command":"send_text","user_id":channel_id,"text":"Без Кэрол"}));
+        let last = pump(&mut owner, &mut [&mut bob, &mut carol]);
+        assert!(!last.iter().any(|(user, _)| user == &carol_id), "{last:?}");
+
+        // Владелец не может просто отписаться, а после удаления канала публиковать нельзя.
+        let owner_leave = call(&mut owner, json!({"command":"leave_channel","channel_id":channel_id}));
+        assert_eq!(owner_leave["ok"], false);
+        let closed = call(&mut owner, json!({"command":"close_channel","channel_id":channel_id}));
+        assert_eq!(closed["ok"], true, "{closed}");
+        pump(&mut owner, &mut [&mut bob, &mut carol]);
+        let bob_closed = call(&mut bob, json!({"command":"select_contact","user_id":channel_id}));
+        assert_eq!(bob_closed["snapshot"]["channel"]["closed"], true);
+        assert_eq!(bob_closed["snapshot"]["channel"]["canPost"], false);
+
+        drop(owner);
+        drop(bob);
+        drop(carol);
+        fs::remove_dir_all(base).ok();
+    }
+
+    /// Приглашение из контактов приходит запросом; принятие — это подписка.
+    #[test]
+    fn a_channel_invite_waits_for_consent() {
+        let base = std::env::temp_dir().join(format!("turat-channel-invite-{}", uuid::Uuid::new_v4()));
+        let mut owner = named_core(&base.join("owner"), "Владелец");
+        let mut bob = named_core(&base.join("bob"), "Боб");
+        let bob_id = bob.identity.public.user_id.clone();
+        add_accepted_contact(&owner, &bob_id, "Боб");
+        let created = call(&mut owner, json!({"command":"create_channel","name":"Клуб"}));
+        let channel_id = created["value"]["channelId"].as_str().unwrap().to_owned();
+        let invited = call(&mut owner, json!({"command":"invite_to_channel","channel_id":channel_id,"user_ids":[bob_id]}));
+        assert_eq!(invited["ok"], true, "{invited}");
+        pump(&mut owner, &mut [&mut bob]);
+
+        let pending = call(&mut bob, json!({"command":"select_contact","user_id":channel_id}));
+        assert_eq!(pending["snapshot"]["channel"]["pendingInvite"], true);
+        assert_eq!(pending["snapshot"]["channel"]["invitedByName"], "Владелец");
+        call(&mut owner, json!({"command":"send_text","user_id":channel_id,"text":"до согласия"}));
+        assert!(pump(&mut owner, &mut [&mut bob]).is_empty(), "до принятия постов нет");
+
+        let accepted = call(&mut bob, json!({"command":"accept_contact","user_id":channel_id}));
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        pump(&mut bob, &mut [&mut owner]);
+        pump(&mut owner, &mut [&mut bob]);
+        let texts: Vec<String> = bob.store.messages(&channel_id).unwrap().into_iter()
+            .filter(|message| !message.service).map(|message| message.text).collect();
+        assert_eq!(texts, vec!["до согласия"], "история пришла после подписки");
+
+        let left = call(&mut bob, json!({"command":"delete_contact","user_id":channel_id}));
+        assert_eq!(left["ok"], true, "{left}");
+        pump(&mut bob, &mut [&mut owner]);
+        let owner_view = call(&mut owner, json!({"command":"select_contact","user_id":channel_id}));
+        assert_eq!(owner_view["snapshot"]["channel"]["subscriberCount"], 0);
+
+        drop(owner);
+        drop(bob);
+        fs::remove_dir_all(base).ok();
+    }
+
+    /// Привязанная группа обсуждения получает посты как пересланные от имени канала.
+    #[test]
+    fn posts_reach_the_linked_discussion_group() {
+        let root = std::env::temp_dir().join(format!("turat-discussion-{}", uuid::Uuid::new_v4()));
+        let mut core = named_core(&root, "Автор");
+        let alice = member_id(2);
+        add_accepted_contact(&core, &alice, "Алиса");
+        let group = call(&mut core, json!({"command":"create_group","name":"Обсуждение","member_ids":[alice]}));
+        let group_id = group["value"]["groupId"].as_str().unwrap().to_owned();
+        let channel = call(&mut core, json!({"command":"create_channel","name":"Блог"}));
+        let channel_id = channel["value"]["channelId"].as_str().unwrap().to_owned();
+
+        let linked = call(&mut core, json!({"command":"link_discussion_group","channel_id":channel_id,"group_id":group_id}));
+        assert_eq!(linked["ok"], true, "{linked}");
+        assert_eq!(linked["snapshot"]["channel"]["settings"]["discussionGroupName"], "Обсуждение");
+        assert_eq!(linked["snapshot"]["channel"]["discussionJoined"], true);
+
+        let posted = call(&mut core, json!({"command":"send_text","user_id":channel_id,"text":"Новая заметка"}));
+        assert_eq!(posted["ok"], true, "{posted}");
+        assert_eq!(posted["snapshot"]["selectedContactId"], channel_id, "публикация не уводит из канала");
+        let forwarded = core.store.messages(&group_id).unwrap().into_iter()
+            .find(|message| message.text == "Новая заметка").expect("пост в группе");
+        assert_eq!(forwarded.forwarded_from.as_deref(), Some("Блог"));
+
+        let unlinked = call(&mut core, json!({"command":"link_discussion_group","channel_id":channel_id,"group_id":null}));
+        assert_eq!(unlinked["ok"], true, "{unlinked}");
+        assert!(unlinked["snapshot"]["channel"]["settings"]["discussionGroupId"].is_null());
 
         drop(core);
         fs::remove_dir_all(root).ok();

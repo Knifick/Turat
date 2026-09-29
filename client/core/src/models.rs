@@ -153,8 +153,32 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reaction_marks: Vec<ReactionMark>,
     /// Имя автора для ленты группы. Заполняется только в снимке и не хранится.
+    /// Исключение — комментарии канала: подписчики друг друга не знают, поэтому там
+    /// хранится имя, которым комментатор подписался сам.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_name: Option<String>,
+    /// Просмотры, комментарии и реакции поста канала. Заполняется только в снимке.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_post: Option<ChannelPostInfo>,
+}
+
+/// Счётчики поста канала в том виде, в каком их рисует клиент.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelPostInfo {
+    pub views: u32,
+    pub comments: u32,
+    pub reactions: Vec<ReactionCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactionCount {
+    pub reaction: String,
+    pub count: u32,
+    /// Реакцию поставил сам пользователь: чип подсвечивается.
+    #[serde(default)]
+    pub mine: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +311,259 @@ pub struct GroupView {
     pub can_delete_messages: bool,
 }
 
+/// Роль в канале. Подписчики в состоянии канала не перечислены вовсе: их знают только
+/// администраторы, а подписчики друг друга не видят.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChannelRole {
+    Admin,
+    Owner,
+}
+
+/// Права администратора канала — как в Telegram. У владельца они все и всегда.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelAdminRights {
+    /// Публиковать посты.
+    #[serde(default)]
+    pub post_messages: bool,
+    /// Редактировать чужие посты.
+    #[serde(default)]
+    pub edit_messages: bool,
+    /// Удалять чужие посты и комментарии.
+    #[serde(default)]
+    pub delete_messages: bool,
+    /// Приглашать подписчиков и раздавать ссылку-приглашение.
+    #[serde(default)]
+    pub invite_users: bool,
+    /// Менять название, описание, фото и настройки канала.
+    #[serde(default)]
+    pub change_info: bool,
+    /// Удалять и блокировать подписчиков.
+    #[serde(default)]
+    pub ban_users: bool,
+    /// Назначать новых администраторов (с правами не шире своих).
+    #[serde(default)]
+    pub add_admins: bool,
+}
+
+impl ChannelAdminRights {
+    pub const ALL: Self = Self {
+        post_messages: true,
+        edit_messages: true,
+        delete_messages: true,
+        invite_users: true,
+        change_info: true,
+        ban_users: true,
+        add_admins: true,
+    };
+
+    fn flags(self) -> [bool; 7] {
+        [
+            self.post_messages,
+            self.edit_messages,
+            self.delete_messages,
+            self.invite_users,
+            self.change_info,
+            self.ban_users,
+            self.add_admins,
+        ]
+    }
+
+    /// Каждое право из `self` есть и в `other`: администратор не выдаёт того, чего нет у него.
+    pub fn within(self, other: Self) -> bool {
+        self.flags()
+            .iter()
+            .zip(other.flags())
+            .all(|(mine, theirs)| !*mine || theirs)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelAdmin {
+    pub user_id: String,
+    pub display_name: String,
+    pub role: ChannelRole,
+    pub rights: ChannelAdminRights,
+    /// Подпись администратора («Редактор»), до 16 символов.
+    #[serde(default)]
+    pub title: String,
+    pub added_by: String,
+    pub added_at_unix_milliseconds: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSettings {
+    /// Подписывать посты именем автора.
+    #[serde(default)]
+    pub sign_posts: bool,
+    /// Комментарии под постами.
+    #[serde(default)]
+    pub comments_enabled: bool,
+    /// Привязанная группа для обсуждения: посты автоматически уходят и туда.
+    #[serde(default)]
+    pub discussion_group_id: Option<String>,
+    #[serde(default)]
+    pub discussion_group_name: String,
+}
+
+/// Полное состояние канала: как и у группы, уходит целиком с растущим `epoch`, а
+/// получатель проверяет разницу по правам автора в прежнем состоянии.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelState {
+    pub version: i32,
+    pub channel_id: String,
+    pub epoch: i64,
+    pub name: String,
+    pub about: String,
+    pub avatar_base64: Option<String>,
+    pub created_by: String,
+    pub created_at_unix_milliseconds: i64,
+    pub admins: Vec<ChannelAdmin>,
+    pub settings: ChannelSettings,
+    /// Владелец удалил канал: больше ничего не публикуется и не меняется.
+    #[serde(default)]
+    pub closed: bool,
+    pub updated_by: String,
+    pub updated_at_unix_milliseconds: i64,
+}
+
+/// Канал в локальном хранилище.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelRecord {
+    pub state: ChannelState,
+    /// Подписка по ссылке отправлена, но администратор ещё не прислал состояние канала.
+    #[serde(default)]
+    pub awaiting_state: bool,
+    /// Администратор, через которого пришла подписка или приглашение.
+    #[serde(default)]
+    pub via: Option<String>,
+    #[serde(default)]
+    pub pending_invite: bool,
+    #[serde(default)]
+    pub invited_by: Option<String>,
+    /// Пользователь отписался: история остаётся, новые посты не приходят.
+    #[serde(default)]
+    pub left: bool,
+    /// Пользователя удалили из подписчиков.
+    #[serde(default)]
+    pub removed: bool,
+    /// Чат убран из списка — надгробие, как у группы.
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub draft: String,
+    #[serde(default)]
+    pub manual_unread: bool,
+    #[serde(default)]
+    pub joined_at_unix_milliseconds: i64,
+    /// Число подписчиков, объявленное администратором, и время этого объявления.
+    #[serde(default)]
+    pub subscriber_count: u32,
+    #[serde(default)]
+    pub subscriber_count_at_unix_milliseconds: i64,
+    /// У автора накопились новые просмотры или реакции, ещё не разосланные подписчикам.
+    #[serde(default)]
+    pub stats_dirty: bool,
+    #[serde(default)]
+    pub stats_sent_at_unix_milliseconds: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubscriberStatus {
+    Active,
+    Left,
+    Banned,
+}
+
+/// Подписчик в списке, который ведут администраторы. Списки разных администраторов
+/// сходятся по правилу «побеждает более поздняя запись».
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSubscriber {
+    pub user_id: String,
+    pub display_name: String,
+    pub status: SubscriberStatus,
+    pub subscribed_at_unix_milliseconds: i64,
+    pub updated_at_unix_milliseconds: i64,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelAdminView {
+    pub user_id: String,
+    pub display_name: String,
+    pub avatar_base64: Option<String>,
+    pub role: ChannelRole,
+    pub rights: ChannelAdminRights,
+    pub title: String,
+    pub is_self: bool,
+    pub added_by_name: String,
+    /// Текущий пользователь может менять права этого администратора или разжаловать его.
+    pub can_edit: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSubscriberView {
+    pub user_id: String,
+    pub display_name: String,
+    pub avatar_base64: Option<String>,
+    pub is_contact: bool,
+    pub banned: bool,
+    pub subscribed_at_unix_milliseconds: i64,
+}
+
+/// Карточка открытого канала и то, что текущему пользователю в нём разрешено.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelView {
+    pub channel_id: String,
+    pub name: String,
+    pub about: String,
+    pub avatar_base64: Option<String>,
+    pub epoch: i64,
+    pub created_at_unix_milliseconds: i64,
+    pub my_role: Option<ChannelRole>,
+    pub my_rights: ChannelAdminRights,
+    pub my_title: String,
+    pub awaiting_state: bool,
+    pub pending_invite: bool,
+    pub invited_by_name: Option<String>,
+    pub left: bool,
+    pub removed: bool,
+    pub closed: bool,
+    pub settings: ChannelSettings,
+    /// Пользователь состоит в привязанной группе и может открыть обсуждение.
+    pub discussion_joined: bool,
+    pub subscriber_count: u32,
+    pub admins: Vec<ChannelAdminView>,
+    /// Подписчики — только для администраторов.
+    pub subscribers: Vec<ChannelSubscriberView>,
+    pub invite_link: Option<String>,
+    pub can_post: bool,
+    pub can_edit_info: bool,
+    pub can_invite: bool,
+    pub can_ban: bool,
+    pub can_add_admins: bool,
+    pub can_delete_messages: bool,
+    pub can_edit_messages: bool,
+    pub can_comment: bool,
+    pub can_react: bool,
+    /// Открытая ветка комментариев: пост, к которому они относятся.
+    pub thread_post_event_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -340,7 +617,15 @@ pub struct Chat {
     pub member_count: u32,
     pub group_role: Option<GroupRole>,
     /// Пользователь покинул группу или исключён: писать в неё нельзя.
+    /// У канала — отписался, удалён из подписчиков или канал закрыт.
     pub group_left: bool,
+    /// Строка — канал: `userId` содержит ChannelID (`ttc1-…`), `memberCount` — подписчики.
+    #[serde(default)]
+    pub is_channel: bool,
+    pub channel_role: Option<ChannelRole>,
+    /// Может ли пользователь публиковать в канал: поле ввода показывается только тогда.
+    #[serde(default)]
+    pub channel_can_post: bool,
 }
 
 /// Результат глобального поиска по всем диалогам.
@@ -372,6 +657,10 @@ pub struct Snapshot {
     pub search_results: Vec<SearchHit>,
     /// Карточка выбранной группы; у личного диалога пусто.
     pub group: Option<GroupView>,
+    /// Карточка выбранного канала.
+    pub channel: Option<ChannelView>,
+    /// Комментарии к открытому посту канала (`channel.threadPostEventId`).
+    pub comments: Vec<Message>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -600,6 +889,88 @@ pub enum Command {
     /// Выход из группы с сохранением истории. Удаление чата группы — `delete_contact`.
     LeaveGroup {
         group_id: String,
+    },
+    /// Новый канал. Возвращает `channelId`. Публикуют в канал через `send_text` с его id.
+    CreateChannel {
+        name: String,
+        #[serde(default)]
+        about: String,
+        #[serde(default)]
+        avatar_base64: Option<String>,
+    },
+    /// Подписка по ссылке-приглашению `turat://channel/<id>?via=<UserID>`. Возвращает `channelId`.
+    SubscribeChannel {
+        link: String,
+    },
+    UpdateChannelInfo {
+        channel_id: String,
+        name: String,
+        #[serde(default)]
+        about: String,
+        #[serde(default)]
+        avatar_base64: Option<String>,
+    },
+    SetChannelSettings {
+        channel_id: String,
+        sign_posts: bool,
+        comments_enabled: bool,
+    },
+    /// Привязать группу для обсуждения; `group_id: null` — отвязать.
+    LinkDiscussionGroup {
+        channel_id: String,
+        #[serde(default)]
+        group_id: Option<String>,
+    },
+    /// Пригласить принятые контакты: каждый получит приглашение и решит сам.
+    InviteToChannel {
+        channel_id: String,
+        user_ids: Vec<String>,
+    },
+    /// Назначить администратора или изменить его права и подпись.
+    SetChannelAdmin {
+        channel_id: String,
+        user_id: String,
+        rights: ChannelAdminRights,
+        #[serde(default)]
+        title: String,
+    },
+    RemoveChannelAdmin {
+        channel_id: String,
+        user_id: String,
+    },
+    TransferChannelOwnership {
+        channel_id: String,
+        user_id: String,
+    },
+    /// Удалить подписчика; `ban` ещё и не даёт ему подписаться снова.
+    RemoveChannelSubscriber {
+        channel_id: String,
+        user_id: String,
+        #[serde(default)]
+        ban: bool,
+    },
+    UnbanChannelSubscriber {
+        channel_id: String,
+        user_id: String,
+    },
+    /// Отписаться (администратор заодно слагает полномочия), история остаётся.
+    LeaveChannel {
+        channel_id: String,
+    },
+    /// Владелец удаляет канал у всех.
+    CloseChannel {
+        channel_id: String,
+    },
+    /// Открыть комментарии к посту; `null` — закрыть.
+    OpenComments {
+        #[serde(default)]
+        post_event_id: Option<String>,
+    },
+    SendComment {
+        post_event_id: String,
+        text: String,
+        #[serde(default)]
+        reply_to_event_id: Option<String>,
     },
 }
 

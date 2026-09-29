@@ -10,7 +10,7 @@ use crate::{
     blobs::AttachmentManifest,
     identity::StoredIdentity,
     mailbox::{MailboxGrant, OwnedMailbox},
-    models::{Contact, GroupRecord, Message, Profile, Settings},
+    models::{ChannelRecord, ChannelSubscriber, Contact, GroupRecord, Message, Profile, Settings},
     prekeys::PrekeyState,
     protocol::SignedProtocolEvent,
     ratchet::RatchetSession,
@@ -39,6 +39,26 @@ pub struct PendingGroupState {
     pub actor: String,
     pub created_at_unix_milliseconds: i64,
     pub state: crate::models::GroupState,
+}
+
+/// То же для канала.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingChannelState {
+    pub event_id: String,
+    pub actor: String,
+    pub created_at_unix_milliseconds: i64,
+    pub state: crate::models::ChannelState,
+}
+
+/// Подписанный пост канала в исходном виде и его последняя правка: новому подписчику
+/// администратор пересылает именно их, чтобы подпись автора проверялась и у него.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredChannelPost {
+    pub post: crate::protocol::RelayedEvent,
+    #[serde(default)]
+    pub edit: Option<crate::protocol::RelayedEvent>,
 }
 
 /// Событие, ждущее отправки. Шифрование откладывается до самой доставки: пока
@@ -141,7 +161,49 @@ impl Store {
                value BLOB NOT NULL
              );
              CREATE INDEX IF NOT EXISTS ix_group_pending_states
-               ON group_pending_states(group_id, epoch);",
+               ON group_pending_states(group_id, epoch);
+             CREATE TABLE IF NOT EXISTS channels(
+               channel_id TEXT PRIMARY KEY,
+               value BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS channel_pending_states(
+               event_id TEXT PRIMARY KEY,
+               channel_id TEXT NOT NULL,
+               epoch INTEGER NOT NULL,
+               received_at_ms INTEGER NOT NULL,
+               value BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS ix_channel_pending_states
+               ON channel_pending_states(channel_id, epoch);
+             CREATE TABLE IF NOT EXISTS channel_subscribers(
+               channel_id TEXT NOT NULL,
+               user_id TEXT NOT NULL,
+               value BLOB NOT NULL,
+               PRIMARY KEY(channel_id, user_id)
+             );
+             CREATE TABLE IF NOT EXISTS channel_posts(
+               event_id TEXT PRIMARY KEY,
+               channel_id TEXT NOT NULL,
+               created_at_ms INTEGER NOT NULL,
+               value BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS ix_channel_posts
+               ON channel_posts(channel_id, created_at_ms);
+             CREATE TABLE IF NOT EXISTS channel_views(
+               post_id TEXT NOT NULL,
+               viewer_id TEXT NOT NULL,
+               PRIMARY KEY(post_id, viewer_id)
+             );
+             CREATE TABLE IF NOT EXISTS channel_reactions(
+               post_id TEXT NOT NULL,
+               user_id TEXT NOT NULL,
+               reaction TEXT NOT NULL,
+               PRIMARY KEY(post_id, user_id, reaction)
+             );
+             CREATE TABLE IF NOT EXISTS channel_post_stats(
+               event_id TEXT PRIMARY KEY,
+               value BLOB NOT NULL
+             );",
         )?;
         Ok(Self {
             connection,
@@ -817,6 +879,295 @@ impl Store {
         Ok(())
     }
 
+    pub fn channels(&self) -> Result<Vec<ChannelRecord>, CoreError> {
+        let mut statement = self.connection.prepare("SELECT value FROM channels")?;
+        let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.map(|value| self.decrypt_json(&value?)).collect()
+    }
+
+    pub fn channel(&self, channel_id: &str) -> Result<Option<ChannelRecord>, CoreError> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT value FROM channels WHERE channel_id=?1",
+                [channel_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        value.map(|bytes| self.decrypt_json(&bytes)).transpose()
+    }
+
+    pub fn save_channel(&self, record: &ChannelRecord) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT INTO channels(channel_id,value) VALUES(?1,?2)
+             ON CONFLICT(channel_id) DO UPDATE SET value=excluded.value",
+            params![record.state.channel_id, self.encrypt_json(record)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_pending_channel_state(&self, value: &PendingChannelState) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO channel_pending_states(event_id,channel_id,epoch,received_at_ms,value)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![
+                value.event_id,
+                value.state.channel_id,
+                value.state.epoch,
+                chrono::Utc::now().timestamp_millis(),
+                self.encrypt_json(value)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn pending_channel_states(&self, channel_id: &str) -> Result<Vec<PendingChannelState>, CoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT value FROM channel_pending_states WHERE channel_id=?1 ORDER BY epoch LIMIT 200",
+        )?;
+        let rows = statement.query_map([channel_id], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.map(|value| self.decrypt_json(&value?)).collect()
+    }
+
+    pub fn delete_pending_channel_state(&self, event_id: &str) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM channel_pending_states WHERE event_id=?1",
+            [event_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_pending_channel_states(&self, channel_id: &str) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM channel_pending_states WHERE channel_id=?1",
+            [channel_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn prune_pending_channel_states(&self, older_than_ms: i64) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM channel_pending_states WHERE received_at_ms < ?1",
+            [older_than_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn channel_subscribers(&self, channel_id: &str) -> Result<Vec<ChannelSubscriber>, CoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT value FROM channel_subscribers WHERE channel_id=?1")?;
+        let rows = statement.query_map([channel_id], |row| row.get::<_, Vec<u8>>(0))?;
+        rows.map(|value| self.decrypt_json(&value?)).collect()
+    }
+
+    pub fn channel_subscriber(
+        &self,
+        channel_id: &str,
+        user_id: &str,
+    ) -> Result<Option<ChannelSubscriber>, CoreError> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT value FROM channel_subscribers WHERE channel_id=?1 AND user_id=?2",
+                [channel_id, user_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        value.map(|bytes| self.decrypt_json(&bytes)).transpose()
+    }
+
+    pub fn save_channel_subscriber(
+        &self,
+        channel_id: &str,
+        value: &ChannelSubscriber,
+    ) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT INTO channel_subscribers(channel_id,user_id,value) VALUES(?1,?2,?3)
+             ON CONFLICT(channel_id,user_id) DO UPDATE SET value=excluded.value",
+            params![channel_id, value.user_id, self.encrypt_json(value)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_channel_subscribers(&self, channel_id: &str) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM channel_subscribers WHERE channel_id=?1",
+            [channel_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_channel_post(
+        &self,
+        channel_id: &str,
+        created_at_ms: i64,
+        value: &StoredChannelPost,
+    ) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT INTO channel_posts(event_id,channel_id,created_at_ms,value) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(event_id) DO UPDATE SET value=excluded.value",
+            params![
+                value.post.event.event_id,
+                channel_id,
+                created_at_ms,
+                self.encrypt_json(value)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn channel_post(&self, event_id: &str) -> Result<Option<StoredChannelPost>, CoreError> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT value FROM channel_posts WHERE event_id=?1",
+                [event_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        value.map(|bytes| self.decrypt_json(&bytes)).transpose()
+    }
+
+    /// Последние посты канала в хронологическом порядке.
+    pub fn recent_channel_posts(
+        &self,
+        channel_id: &str,
+        limit: usize,
+    ) -> Result<Vec<StoredChannelPost>, CoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT value FROM channel_posts WHERE channel_id=?1 ORDER BY created_at_ms DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![channel_id, limit as i64], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+        let mut posts: Vec<StoredChannelPost> =
+            rows.map(|value| self.decrypt_json(&value?)).collect::<Result<_, _>>()?;
+        posts.reverse();
+        Ok(posts)
+    }
+
+    pub fn delete_channel_post(&self, event_id: &str) -> Result<(), CoreError> {
+        self.connection
+            .execute("DELETE FROM channel_posts WHERE event_id=?1", [event_id])?;
+        Ok(())
+    }
+
+    /// Возвращает `true`, если этот читатель засчитан впервые.
+    pub fn add_channel_view(&self, post_id: &str, viewer_id: &str) -> Result<bool, CoreError> {
+        Ok(self.connection.execute(
+            "INSERT OR IGNORE INTO channel_views(post_id,viewer_id) VALUES(?1,?2)",
+            [post_id, viewer_id],
+        )? == 1)
+    }
+
+    pub fn channel_view_count(&self, post_id: &str) -> Result<u32, CoreError> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM channel_views WHERE post_id=?1",
+            [post_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn set_channel_reaction(
+        &self,
+        post_id: &str,
+        user_id: &str,
+        reaction: &str,
+        active: bool,
+    ) -> Result<bool, CoreError> {
+        let changed = if active {
+            self.connection.execute(
+                "INSERT OR IGNORE INTO channel_reactions(post_id,user_id,reaction) VALUES(?1,?2,?3)",
+                [post_id, user_id, reaction],
+            )?
+        } else {
+            self.connection.execute(
+                "DELETE FROM channel_reactions WHERE post_id=?1 AND user_id=?2 AND reaction=?3",
+                [post_id, user_id, reaction],
+            )?
+        };
+        Ok(changed == 1)
+    }
+
+    pub fn channel_reaction_counts(&self, post_id: &str) -> Result<Vec<(String, u32)>, CoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT reaction, COUNT(*) FROM channel_reactions WHERE post_id=?1
+             GROUP BY reaction ORDER BY COUNT(*) DESC, reaction",
+        )?;
+        let rows = statement.query_map([post_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn save_channel_post_stats(
+        &self,
+        value: &crate::protocol::ChannelPostStats,
+    ) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT INTO channel_post_stats(event_id,value) VALUES(?1,?2)
+             ON CONFLICT(event_id) DO UPDATE SET value=excluded.value",
+            params![value.event_id, self.encrypt_json(value)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn channel_post_stats(
+        &self,
+        event_id: &str,
+    ) -> Result<Option<crate::protocol::ChannelPostStats>, CoreError> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT value FROM channel_post_stats WHERE event_id=?1",
+                [event_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        value.map(|bytes| self.decrypt_json(&bytes)).transpose()
+    }
+
+    /// Число записей диалога — для счётчика комментариев без расшифровки каждого.
+    pub fn count_messages(&self, conversation_id: &str) -> Result<u32, CoreError> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*) FROM events WHERE conversation_id=?1",
+            [conversation_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn delete_message(&self, event_id: &str) -> Result<(), CoreError> {
+        self.connection
+            .execute("DELETE FROM events WHERE event_id=?1", [event_id])?;
+        Ok(())
+    }
+
+    /// Все ветки комментариев канала хранятся как диалоги `<ChannelID>/<пост>`.
+    pub fn clear_conversations_with_prefix(&self, prefix: &str) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM events WHERE substr(conversation_id,1,length(?1))=?1",
+            [prefix],
+        )?;
+        Ok(())
+    }
+
+    /// Всё, что относится к каналу, кроме самой записи-надгробия.
+    pub fn forget_channel_data(&self, channel_id: &str) -> Result<(), CoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute("DELETE FROM channel_subscribers WHERE channel_id=?1", [channel_id])?;
+        transaction.execute("DELETE FROM channel_pending_states WHERE channel_id=?1", [channel_id])?;
+        transaction.execute(
+            "DELETE FROM channel_views WHERE post_id IN (SELECT event_id FROM channel_posts WHERE channel_id=?1)",
+            [channel_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM channel_reactions WHERE post_id IN (SELECT event_id FROM channel_posts WHERE channel_id=?1)",
+            [channel_id],
+        )?;
+        transaction.execute("DELETE FROM channel_posts WHERE channel_id=?1", [channel_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn revoke_device(&self, device_id: &str) -> Result<(), CoreError> {
         self.connection.execute(
             "INSERT OR REPLACE INTO revoked_devices(device_id,revoked_at_ms) VALUES(?1,?2)",
@@ -833,6 +1184,7 @@ impl Store {
             "settings": self.settings()?,
             "contacts": self.contacts()?,
             "groups": self.groups()?,
+            "channels": self.channels()?,
             "events": self.all_messages()?
         }))
     }
@@ -848,6 +1200,10 @@ impl Store {
         transaction.execute("DELETE FROM events", [])?;
         transaction.execute("DELETE FROM groups", [])?;
         transaction.execute("DELETE FROM group_pending_states", [])?;
+        transaction.execute("DELETE FROM channels", [])?;
+        transaction.execute("DELETE FROM channel_pending_states", [])?;
+        transaction.execute("DELETE FROM channel_subscribers", [])?;
+        transaction.execute("DELETE FROM channel_posts", [])?;
         transaction.commit()?;
         self.replace_identity(&serde_json::from_value(value["identity"].clone())?)?;
         self.save_profile(&serde_json::from_value(value["profile"].clone())?)?;
@@ -859,6 +1215,11 @@ impl Store {
         if let Some(groups) = value.get("groups").filter(|groups| groups.is_array()) {
             for group in serde_json::from_value::<Vec<GroupRecord>>(groups.clone())? {
                 self.save_group(&group)?;
+            }
+        }
+        if let Some(channels) = value.get("channels").filter(|channels| channels.is_array()) {
+            for channel in serde_json::from_value::<Vec<ChannelRecord>>(channels.clone())? {
+                self.save_channel(&channel)?;
             }
         }
         for message in serde_json::from_value::<Vec<Message>>(value["events"].clone())? {

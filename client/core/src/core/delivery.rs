@@ -23,7 +23,7 @@ use crate::{
         KIND_EDIT, KIND_REACTION, KIND_RECEIPT_DELIVERY, KIND_RECEIPT_READ, KIND_TEXT,
         PROTOCOL_VERSION, ReactionPayload, SignedDeliveryPackage, SignedProtocolEvent,
         TargetPayload, TextPayload, WIRE_RATCHET, WIRE_SESSION_INIT, WireIdentity, WireMessage,
-        is_group_id,
+        KIND_CHANNEL_COMMENT, is_channel_id, is_group_id,
     },
     ratchet::{self, InitialSessionEnvelope, RatchetMessage},
     routing::{SignedDeviceList, SignedRoutingDescriptor},
@@ -234,7 +234,9 @@ impl AppCore {
             let batch = jobs.len();
             for job in jobs {
                 handled += 1;
-                let group = is_group_id(&job.event.conversation_id);
+                // Канал рассылает так же, как группа: по задаче на получателя.
+                let group = is_group_id(&job.event.conversation_id)
+                    || is_channel_id(&job.event.conversation_id);
                 if group && now - job.event.created_at_unix_milliseconds > GROUP_JOB_TTL_MILLISECONDS {
                     self.store.complete_outbox(&job.job_id)?;
                     continue;
@@ -245,7 +247,10 @@ impl AppCore {
                         // Квитанций о доставке группа не шлёт — это N² трафика. Первая
                         // галочка значит «ушло хотя бы одному участнику».
                         if group
-                            && matches!(job.event.kind.as_str(), KIND_TEXT | KIND_ATTACHMENT)
+                            && matches!(
+                                job.event.kind.as_str(),
+                                KIND_TEXT | KIND_ATTACHMENT | KIND_CHANNEL_COMMENT
+                            )
                         {
                             self.store.mark_delivered(&job.event.event_id)?;
                         }
@@ -347,6 +352,7 @@ impl AppCore {
             if private.is_empty()
                 && !is_contact_request(&job.event)
                 && !is_group_id(&job.event.conversation_id)
+                && !is_channel_id(&job.event.conversation_id)
             {
                 failure = Some(CoreError::InvalidInput(
                     "Собеседник ещё не ответил: пока можно отправить только короткое текстовое сообщение".to_owned(),
@@ -543,7 +549,8 @@ impl AppCore {
             || !event.verify(&wire.sender_identity)
             || (event.conversation_id
                 != conversation_id(&self.identity.public.user_id, &event.sender_user_id)
-                && !is_group_id(&event.conversation_id))
+                && !is_group_id(&event.conversation_id)
+                && !is_channel_id(&event.conversation_id))
         {
             return Err(CoreError::Crypto(
                 "Событие не прошло проверку подписи".to_owned(),
@@ -590,6 +597,9 @@ impl AppCore {
         // Событие группы не создаёт запрос на общение: у группы свои правила допуска.
         if is_group_id(&event.conversation_id) {
             return self.apply_group_event(event);
+        }
+        if is_channel_id(&event.conversation_id) {
+            return self.apply_channel_event(event, sender);
         }
 
         let existing = self.store.contact(&event.sender_user_id)?;
@@ -663,6 +673,7 @@ impl AppCore {
                     service: false,
                     reaction_marks: Vec::new(),
                     sender_name: None,
+                    channel_post: None,
                 })?;
                 true
             }
@@ -690,6 +701,7 @@ impl AppCore {
                     service: false,
                     reaction_marks: Vec::new(),
                     sender_name: None,
+                    channel_post: None,
                 })?;
                 // Файл догружается фоном: история не должна ждать стомегабайтного видео.
                 self.store

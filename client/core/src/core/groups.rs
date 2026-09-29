@@ -1132,6 +1132,7 @@ impl AppCore {
             service: true,
             reaction_marks: Vec::new(),
             sender_name: None,
+            channel_post: None,
         })
     }
 
