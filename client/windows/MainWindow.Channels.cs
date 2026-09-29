@@ -102,7 +102,7 @@ public sealed partial class MainWindow
 
     private async void ShowSubscribeDialog()
     {
-        var link = new TextBox { Header = "Ссылка на канал", PlaceholderText = "turat://channel/ttc1-…?via=tt1-…" };
+        var link = new TextBox { Header = "Ссылка на канал", PlaceholderText = "turat://channel/ttch1-…?via=tt1-…" };
         TextBlock error = ErrorText();
         var panel = new StackPanel { Spacing = 10, MinWidth = 380 };
         panel.Children.Add(HintText(

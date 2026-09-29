@@ -619,7 +619,7 @@ pub struct Chat {
     /// Пользователь покинул группу или исключён: писать в неё нельзя.
     /// У канала — отписался, удалён из подписчиков или канал закрыт.
     pub group_left: bool,
-    /// Строка — канал: `userId` содержит ChannelID (`ttc1-…`), `memberCount` — подписчики.
+    /// Строка — канал: `userId` содержит ChannelID (`ttch1-…`), `memberCount` — подписчики.
     #[serde(default)]
     pub is_channel: bool,
     pub channel_role: Option<ChannelRole>,

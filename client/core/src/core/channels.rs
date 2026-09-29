@@ -140,7 +140,7 @@ pub fn parse_invite_link(link: &str) -> Result<(String, String), CoreError> {
     match (channel, via) {
         (Some(channel), Some(via)) => Ok(((*channel).to_owned(), (*via).to_owned())),
         _ => Err(denied(
-            "Ссылка на канал должна выглядеть так: turat://channel/ttc1-…?via=tt1-…",
+            "Ссылка на канал должна выглядеть так: turat://channel/ttch1-…?via=tt1-…",
         )),
     }
 }
@@ -564,7 +564,7 @@ impl AppCore {
         let own_name = self.store.profile()?.display_name;
         let state = ChannelState {
             version: CHANNEL_STATE_VERSION,
-            channel_id: format!("ttc1-{}", random_hex(32)),
+            channel_id: format!("ttch1-{}", random_hex(32)),
             epoch: 1,
             name: name.trim().to_owned(),
             about: about.trim().to_owned(),
@@ -2954,7 +2954,7 @@ mod tests {
     fn base() -> ChannelState {
         ChannelState {
             version: CHANNEL_STATE_VERSION,
-            channel_id: format!("ttc1-{}", hex::encode([9u8; 32])),
+            channel_id: format!("ttch1-{}", hex::encode([9u8; 32])),
             epoch: 1,
             name: "Новости".to_owned(),
             about: String::new(),
@@ -3103,7 +3103,7 @@ mod tests {
 
     #[test]
     fn invite_links_round_trip() {
-        let channel = format!("ttc1-{}", hex::encode([9u8; 32]));
+        let channel = format!("ttch1-{}", hex::encode([9u8; 32]));
         let link = invite_link(&channel, &user(2));
         assert_eq!(parse_invite_link(&link).unwrap(), (channel.clone(), user(2)));
         assert_eq!(
@@ -3114,6 +3114,10 @@ mod tests {
         assert_eq!(split_thread(&thread_id(&channel, "evt1-ab")), Some((channel.as_str(), "evt1-ab")));
         assert_eq!(channel_of_conversation(&channel), Some(channel.as_str()));
         assert_eq!(split_thread("tt1-x/evt1-ab"), None);
+        // Личный диалог — тоже `ttc1-` и 64 hex-символа: с каналом его путать нельзя.
+        let direct = crate::identity::conversation_id(&user(1), &user(2));
+        assert!(!is_channel_id(&direct));
+        assert_eq!(channel_of_conversation(&direct), None);
     }
 
     #[test]

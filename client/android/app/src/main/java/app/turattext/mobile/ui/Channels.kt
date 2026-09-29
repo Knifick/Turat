@@ -194,7 +194,7 @@ fun NewChannelScreen(
             TelegramButton(
                 if (busy) "Отправка…" else "Подписаться",
                 { onSubscribe(link) },
-                enabled = link.contains("ttc1-") && !busy,
+                enabled = link.contains("ttch1-") && !busy,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
             )
         }

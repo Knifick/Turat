@@ -359,3 +359,85 @@ fn an_attachment_arrives_and_decrypts() {
     assert_eq!(exported["ok"], true, "{exported}");
     assert_eq!(std::fs::read(&destination).expect("выгруженный файл"), content);
 }
+
+/// Канал с подписчиками, незнакомыми владельцу: подписка по ссылке через публичный ящик,
+/// история, пост, комментарий через администратора, просмотры и удаление подписчика.
+#[test]
+#[ignore = "нужен запущенный Node: TURAT_TEST_NODE"]
+fn a_channel_reaches_subscribers_who_are_strangers() {
+    let Some(node) = node_url() else {
+        panic!("Задайте TURAT_TEST_NODE");
+    };
+    let mut alice = Client::open("Алиса", &node);
+    let mut bob = Client::open("Боб", &node);
+    let mut carol = Client::open("Кэрол", &node);
+    for client in [&mut alice, &mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+    }
+    let carol_id = carol.user_id.clone();
+
+    let created = call_ok(&mut alice, json!({"command": "create_channel", "name": "Новости", "about": "Главное"}));
+    let channel_id = created["value"]["channelId"].as_str().unwrap().to_owned();
+    let link = created["snapshot"]["channel"]["inviteLink"].as_str().unwrap().to_owned();
+    call_ok(&mut alice, json!({"command": "send_text", "user_id": channel_id, "text": "до подписки"}));
+
+    for client in [&mut bob, &mut carol] {
+        let subscribed = call_ok(client, json!({"command": "subscribe_channel", "link": link}));
+        assert_eq!(subscribed["snapshot"]["channel"]["awaitingState"], true);
+    }
+    for _ in 0..2 {
+        for client in [&mut alice, &mut bob, &mut carol] {
+            assert_eq!(client.sync()["ok"], true);
+        }
+    }
+    for client in [&mut bob, &mut carol] {
+        let view = call_ok(client, json!({"command": "select_contact", "user_id": channel_id}));
+        assert_eq!(view["snapshot"]["channel"]["awaitingState"], false, "{view}");
+        assert_eq!(view["snapshot"]["channel"]["name"], "Новости");
+        assert!(texts(&client.conversation(&channel_id)).contains(&"до подписки".to_owned()), "история не пришла");
+    }
+
+    call_ok(&mut alice, json!({"command": "send_text", "user_id": channel_id, "text": "свежий пост"}));
+    for client in [&mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+    }
+    let post = bob
+        .conversation(&channel_id)
+        .into_iter()
+        .find(|message| message["text"] == "свежий пост")
+        .expect("пост дошёл до Боба");
+    let post_id = post["eventId"].as_str().unwrap().to_owned();
+
+    call_ok(&mut bob, json!({"command": "mark_read", "user_id": channel_id}));
+    call_ok(&mut bob, json!({"command": "send_comment", "post_event_id": post_id, "text": "спасибо!"}));
+    assert_eq!(bob.sync()["ok"], true);
+    assert_eq!(alice.sync()["ok"], true);
+    assert_eq!(carol.sync()["ok"], true);
+    let thread = call_ok(&mut carol, json!({"command": "open_comments", "post_event_id": post_id}));
+    let comments = thread["snapshot"]["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1, "{thread}");
+    assert_eq!(comments[0]["text"], "спасибо!");
+    assert_eq!(comments[0]["senderName"], "Боб");
+
+    let owner_view = call_ok(&mut alice, json!({"command": "select_contact", "user_id": channel_id}));
+    let own_post = owner_view["snapshot"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["eventId"] == post_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(own_post["channelPost"]["views"], 1, "{own_post}");
+    assert_eq!(own_post["channelPost"]["comments"], 1);
+    assert_eq!(owner_view["snapshot"]["channel"]["subscriberCount"], 2);
+
+    call_ok(&mut alice, json!({"command": "remove_channel_subscriber", "channel_id": channel_id, "user_id": carol_id}));
+    call_ok(&mut alice, json!({"command": "send_text", "user_id": channel_id, "text": "уже без Кэрол"}));
+    for client in [&mut bob, &mut carol] {
+        assert_eq!(client.sync()["ok"], true);
+    }
+    assert!(texts(&bob.conversation(&channel_id)).contains(&"уже без Кэрол".to_owned()));
+    assert!(!texts(&carol.conversation(&channel_id)).contains(&"уже без Кэрол".to_owned()));
+    let carol_view = call_ok(&mut carol, json!({"command": "select_contact", "user_id": channel_id}));
+    assert_eq!(carol_view["snapshot"]["channel"]["removed"], true, "{carol_view}");
+}

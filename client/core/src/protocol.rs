@@ -197,9 +197,10 @@ pub const KIND_CHANNEL_VIEWS: &str = "channel.views";
 /// Автор рассылает счётчики своих постов и число подписчиков.
 pub const KIND_CHANNEL_STATS: &str = "channel.stats";
 
-/// Событие относится к каналу.
+/// Событие относится к каналу. Префикс нарочно не `ttc1-`: так начинается ConversationID
+/// личного диалога, и событие собеседника приняли бы за событие канала.
 pub fn is_channel_id(value: &str) -> bool {
-    value.strip_prefix("ttc1-").is_some_and(|hex| {
+    value.strip_prefix("ttch1-").is_some_and(|hex| {
         hex.len() == 64 && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
     })
 }
