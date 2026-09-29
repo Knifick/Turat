@@ -34,6 +34,11 @@
                                          Visibility="{x:Bind GroupVisibility}">
                                     <SymbolIcon Symbol="People" Foreground="{ThemeResource TgText}" />
                                 </Viewbox>
+                                <Viewbox Width="15" Height="15" VerticalAlignment="Center"
+                                         Visibility="{x:Bind ChannelVisibility}">
+                                    <FontIcon Glyph="&#xE789;" FontFamily="Segoe MDL2 Assets"
+                                              Foreground="{ThemeResource TgText}" />
+                                </Viewbox>
                                 <TextBlock Grid.Column="1" Text="{x:Bind DisplayName}" Foreground="{ThemeResource TgText}"
                                            FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                             </Grid>
@@ -203,6 +208,20 @@
                             </Grid>
                             <TextBlock Text="{x:Bind ReactionSummary}" Visibility="{x:Bind ReactionVisibility}"
                                        FontSize="15" Margin="0,3,0,0" />
+                            <!-- Пост канала: реакции, просмотры и комментарии. -->
+                            <StackPanel Visibility="{x:Bind ChannelPostVisibility}" Margin="0,5,0,0" Spacing="4">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                    <TextBlock Text="{x:Bind ChannelReactionsLabel}" FontSize="13" TextWrapping="Wrap"
+                                               Foreground="{ThemeResource TgBubbleInText}" />
+                                    <TextBlock Grid.Column="1" Text="{x:Bind ChannelViewsLabel}" FontSize="11"
+                                               Foreground="{ThemeResource TgMetaIn}" VerticalAlignment="Bottom" />
+                                </Grid>
+                                <StackPanel Orientation="Horizontal" Spacing="14">
+                                    <HyperlinkButton Content="{x:Bind CommentsLabel}" Visibility="{x:Bind CommentsVisibility}"
+                                                     Click="OpenComments_Click" Padding="0" FontSize="13" />
+                                    <HyperlinkButton Content="Реакция" Click="ReactPost_Click" Padding="0" FontSize="13" />
+                                </StackPanel>
+                            </StackPanel>
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -720,6 +739,17 @@
                     <Button Grid.Column="1" Content="Удалить чат" Click="DeleteChat_Click"
                             Background="Transparent" BorderThickness="0" Foreground="{ThemeResource TgDanger}" />
                 </Grid>
+
+                <!-- Канал для подписчика: писать нельзя, остаются звук и состояние подписки. -->
+                <Grid x:Name="ChannelBar" Grid.Row="5" Background="{ThemeResource TgPanel}" Padding="12"
+                      Margin="10,0,10,10" CornerRadius="24"
+                      BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
+                      ColumnDefinitions="*,Auto" ColumnSpacing="8" Visibility="Collapsed">
+                    <TextBlock x:Name="ChannelBarText" VerticalAlignment="Center" TextWrapping="Wrap"
+                               Foreground="{ThemeResource TgHint}" FontSize="13" />
+                    <Button x:Name="ChannelBarButton" Grid.Column="1" Click="ChannelBar_Click"
+                            Background="Transparent" BorderThickness="0" Foreground="{ThemeResource TgAccent}" />
+                </Grid>
             </Grid>
         </Grid>
 
@@ -1061,6 +1091,64 @@
                     </StackPanel>
                 </StackPanel>
             </ScrollViewer>
+        </Grid>
+
+        <!-- Страница канала. Содержимое собирается в коде: состав разделов зависит от прав. -->
+        <Grid x:Name="ChannelPage" Grid.Row="1" Background="{ThemeResource TgOverlay}" Visibility="Collapsed"
+              RowDefinitions="Auto,*">
+            <Grid Height="56" Padding="10,0" Background="{ThemeResource TgPanel}" ColumnDefinitions="Auto,*"
+                  ColumnSpacing="8">
+                <Button Style="{StaticResource TgIconButton}" Click="CloseChannelPage_Click">
+                    <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE72B;" FontSize="15" />
+                </Button>
+                <TextBlock Grid.Column="1" Text="Канал" FontSize="17" FontWeight="SemiBold"
+                           VerticalAlignment="Center" Foreground="{ThemeResource TgText}" />
+            </Grid>
+            <ScrollViewer Grid.Row="1">
+                <StackPanel x:Name="ChannelPageContent" MaxWidth="600" HorizontalAlignment="Stretch"
+                            Padding="20,20,20,32" Spacing="8" />
+            </ScrollViewer>
+        </Grid>
+
+        <!-- Комментарии к посту канала. -->
+        <Grid x:Name="CommentsPage" Grid.Row="1" Background="{ThemeResource TgOverlay}" Visibility="Collapsed"
+              RowDefinitions="Auto,*,Auto">
+            <Grid Height="56" Padding="10,0" Background="{ThemeResource TgPanel}" ColumnDefinitions="Auto,*"
+                  ColumnSpacing="8">
+                <Button Style="{StaticResource TgIconButton}" Click="CloseComments_Click">
+                    <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE72B;" FontSize="15" />
+                </Button>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock x:Name="CommentsTitle" Text="Комментарии" FontSize="16" FontWeight="SemiBold"
+                               Foreground="{ThemeResource TgText}" />
+                    <TextBlock x:Name="CommentsSubtitle" FontSize="12" Foreground="{ThemeResource TgHint}"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+            </Grid>
+            <ScrollViewer x:Name="CommentsScroll" Grid.Row="1">
+                <StackPanel x:Name="CommentsContent" MaxWidth="660" HorizontalAlignment="Stretch"
+                            Padding="16,14,16,14" Spacing="6" />
+            </ScrollViewer>
+            <Grid x:Name="CommentsComposer" Grid.Row="2" Padding="8" Margin="10,0,10,10" CornerRadius="24"
+                  Background="{ThemeResource TgPanel}" BorderThickness="1" BorderBrush="{ThemeResource TgGlassRim}"
+                  RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                <Grid x:Name="CommentReplyBanner" Grid.ColumnSpan="2" ColumnDefinitions="*,Auto" Margin="6,0,0,6"
+                      Visibility="Collapsed">
+                    <TextBlock x:Name="CommentReplyText" Foreground="{ThemeResource TgAccent}" FontSize="12"
+                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    <Button Grid.Column="1" Style="{StaticResource TgIconButton}" Click="CancelCommentReply_Click">
+                        <SymbolIcon Symbol="Cancel" />
+                    </Button>
+                </Grid>
+                <TextBox x:Name="CommentInput" Grid.Row="1" PlaceholderText="Комментарий" MaxLength="4096"
+                         KeyDown="CommentInput_KeyDown" VerticalAlignment="Center" />
+                <Button Grid.Row="1" Grid.Column="1" Style="{StaticResource TgAccentCircle}" Width="40" Height="40"
+                        Click="SendComment_Click" ToolTipService.ToolTip="Отправить">
+                    <SymbolIcon Symbol="Send" />
+                </Button>
+            </Grid>
+            <TextBlock x:Name="CommentsDisabled" Grid.Row="2" Margin="14" TextAlignment="Center"
+                       Foreground="{ThemeResource TgHint}" FontSize="13" Visibility="Collapsed" />
         </Grid>
 
         <ProgressBar x:Name="BusyIndicator" Grid.Row="1" Height="2" VerticalAlignment="Top" IsIndeterminate="True"

@@ -60,6 +60,7 @@ public sealed partial class MessageTemplateSelector : DataTemplateSelector
         DaySeparator => Day,
         TransferModel => Transfer,
         MessageModel { Service: true } => Service,
+        MessageModel { AsPost: true } => Incoming,
         MessageModel { Outgoing: true } => Outgoing,
         MessageModel => Incoming,
         _ => null,

@@ -254,6 +254,8 @@ public sealed partial class MainWindow : Window
             if (SettingsPage.Visibility == Visibility.Visible) FillSettings();
             if (ProfilePage.Visibility == Visibility.Visible) FillProfile();
             if (GroupPage.Visibility == Visibility.Visible) FillGroupPage();
+            if (ChannelPage.Visibility == Visibility.Visible) FillChannelPage();
+            UpdateCommentsPage();
 
             if (snapshot.OnboardingRequired && !_onboardingShown)
             {
@@ -386,12 +388,21 @@ public sealed partial class MainWindow : Window
         EmptyConversation.Visibility = hasChat ? Visibility.Collapsed : Visibility.Visible;
         Composer.Visibility = hasChat && chat!.CanWrite ? Visibility.Visible : Visibility.Collapsed;
         PendingBar.Visibility = hasChat && chat!.PendingApproval ? Visibility.Visible : Visibility.Collapsed;
-        GroupLeftBar.Visibility = hasChat && chat!.GroupLeft ? Visibility.Visible : Visibility.Collapsed;
-        PendingBarText.Text = chat is { IsGroup: true }
-            ? _snapshot.Group?.InvitedByName is string inviter
+        GroupLeftBar.Visibility = hasChat && chat!.GroupLeft && !chat.IsChannel ? Visibility.Visible : Visibility.Collapsed;
+        ChannelBar.Visibility = hasChat && chat!.IsChannel && !chat.CanWrite && !chat.PendingApproval
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        if (chat is { IsChannel: true }) UpdateChannelBar(chat);
+        PendingBarText.Text = chat switch
+        {
+            { IsChannel: true } => _snapshot.Channel?.InvitedByName is string channelInviter
+                ? $"{channelInviter} приглашает вас в канал"
+                : "Вас пригласили в канал",
+            { IsGroup: true } => _snapshot.Group?.InvitedByName is string inviter
                 ? $"{inviter} приглашает вас в группу"
-                : "Вас пригласили в группу"
-            : "Этот пользователь хочет начать переписку";
+                : "Вас пригласили в группу",
+            _ => "Этот пользователь хочет начать переписку",
+        };
 
         if (chat is null)
         {
@@ -406,6 +417,7 @@ public sealed partial class MainWindow : Window
         ContactStatus.Text = chat.Presence;
         ContactOnline.Visibility = chat.OnlineVisibility;
         ContactMuted.Visibility = chat.MutedVisibility;
+        ComposerInput.PlaceholderText = chat.IsChannel ? "Опубликовать пост" : "Отправить сообщение";
 
         bool switchedChat = _draftChatId != chat.UserId;
         if (switchedChat)
@@ -443,8 +455,13 @@ public sealed partial class MainWindow : Window
             MessageModel? next = index + 1 < messages.Count ? messages[index + 1] : null;
             message.FirstInGroup = newDay || !Grouped(previous, message) || message.ReplyToEventId is not null;
             message.LastInGroup = next is null || !Grouped(message, next) || next.ReplyToEventId is not null;
-            // В группе у каждой серии чужих сообщений подписан автор.
-            message.ShowSender = chat.IsGroup && !message.Outgoing && !message.Service && message.FirstInGroup;
+            // В группе у каждой серии чужих сообщений подписан автор. Пост канала подписан,
+            // только если канал подписывает посты: тогда ядро заполняет имя автора.
+            message.ShowSender = chat.IsChannel
+                ? message.SenderName is not null && !message.Service && message.FirstInGroup
+                : chat.IsGroup && !message.Outgoing && !message.Service && message.FirstInGroup;
+            message.AsPost = chat.IsChannel;
+            message.ShowComments = chat.IsChannel && _snapshot.Channel?.Settings.CommentsEnabled == true;
             if (message.ReplyToEventId is string replyId && byId.TryGetValue(replyId, out MessageModel? replied))
             {
                 message.ReplyAuthor = replied.Outgoing ? "Вы" : replied.SenderName ?? chat.DisplayName;
@@ -493,7 +510,7 @@ public sealed partial class MainWindow : Window
     {
         var builder = new StringBuilder(messages.Count * 48);
         builder.Append(chat.UserId).Append('|').Append(chat.DisplayName).Append('|')
-            .Append(chat.IsGroup ? '1' : '0').AppendLine();
+            .Append(chat.IsGroup ? '1' : '0').Append(chat.IsChannel ? '1' : '0').AppendLine();
         foreach (MessageModel message in messages)
         {
             builder.Append(message.EventId).Append(FieldSeparator)
@@ -510,7 +527,12 @@ public sealed partial class MainWindow : Window
                 .Append(message.ReplyToEventId).Append(FieldSeparator)
                 .Append(message.ForwardedFrom).Append(FieldSeparator)
                 .Append(message.Attachment?.AttachmentId).Append(FieldSeparator)
-                .Append(message.Attachment?.Size ?? 0).AppendLine();
+                .Append(message.Attachment?.Size ?? 0).Append(FieldSeparator)
+                .Append(message.ChannelPost?.Views ?? -1).Append(',')
+                .Append(message.ChannelPost?.Comments ?? -1).Append(',')
+                .Append(message.ChannelPost is null ? string.Empty
+                    : string.Join(';', message.ChannelPost.Reactions.Select(value => value.Reaction + value.Count)))
+                .AppendLine();
         }
         return builder.ToString();
     }
@@ -599,10 +621,13 @@ public sealed partial class MainWindow : Window
         }
         // Из группы, где писать нельзя, остаются только чтение, копирование и свои удаления.
         bool canWrite = _snapshot?.SelectedChat?.CanWrite != false;
-        bool moderator = _snapshot?.Group?.CanDeleteMessages == true;
+        bool isChannel = _snapshot?.SelectedChat?.IsChannel == true;
+        ChannelViewModel? channel = isChannel ? _snapshot?.Channel : null;
+        bool moderator = _snapshot?.Group?.CanDeleteMessages == true
+            || _snapshot?.SelectedChat?.IsChannel == true && _snapshot.Channel?.CanDeleteMessages == true;
         var menu = new MenuFlyout();
         menu.MenuFlyoutPresenterStyle = (Style)Application.Current.Resources["TgMessageMenuPresenter"];
-        if (!message.Deleted && canWrite)
+        if (!message.Deleted && canWrite && !isChannel)
         {
             menu.Items.Add(MessageMenuItem("Ответить", "", () =>
             {
@@ -612,7 +637,7 @@ public sealed partial class MainWindow : Window
                 ComposerInput.Focus(FocusState.Programmatic);
             }));
         }
-        if (message is { Outgoing: true, Deleted: false } && canWrite)
+        if (message is { Deleted: false } && canWrite && (message.Outgoing || channel?.CanEditMessages == true))
         {
             menu.Items.Add(MessageMenuItem("Изменить", "", () => BeginEdit(message)));
         }
@@ -636,9 +661,22 @@ public sealed partial class MainWindow : Window
         {
             menu.Items.Add(MessageMenuItem("Удалить у всех", "", async () =>
             {
-                if (await ConfirmAsync("Удалить сообщение?", "Сообщение участника исчезнет у всех в группе."))
+                if (await ConfirmAsync("Удалить сообщение?", isChannel
+                        ? "Пост исчезнет у всех подписчиков канала."
+                        : "Сообщение участника исчезнет у всех в группе."))
                     await ExecuteAsync(new { command = "delete_messages", event_ids = new[] { message.EventId } });
             }));
+        }
+        if (channel is not null && message is { Deleted: false, ChannelPost: not null })
+        {
+            menu.Items.Add(MessageMenuItem("Комментарии", string.Empty, async () =>
+                await ExecuteAsync(new { command = "open_comments", post_event_id = message.EventId })));
+        }
+        if (isChannel && message is { Outgoing: false, Deleted: false } && !moderator)
+        {
+            // Подписчик убирает пост только у себя.
+            menu.Items.Add(MessageMenuItem("Удалить у себя", string.Empty, async () =>
+                await ExecuteAsync(new { command = "delete_messages", event_ids = new[] { message.EventId } })));
         }
         menu.Items.Add(MessageMenuItem("Выделить", "", () => EnterMessageSelectionMode(message)));
         ShowMenu(menu, sender, args);
@@ -820,9 +858,10 @@ public sealed partial class MainWindow : Window
     private async void DeleteSelected_Click(object sender, RoutedEventArgs e)
     {
         // Модератор группы удаляет и чужие сообщения; права младших по роли ядро отсеет само.
-        bool moderator = _snapshot?.Group?.CanDeleteMessages == true;
+        bool moderator = _snapshot?.Group?.CanDeleteMessages == true
+            || _snapshot?.SelectedChat?.IsChannel == true && _snapshot.Channel?.CanDeleteMessages == true;
         string[] ids = [.. SelectedMessages()
-            .Where(value => !value.Service && (value.Outgoing || moderator))
+            .Where(value => !value.Service && (value.Outgoing || moderator || _snapshot?.SelectedChat?.IsChannel == true))
             .Select(value => value.EventId)];
         MessagesList.SelectedItems.Clear();
         if (ids.Length > 0) await ExecuteAsync(new { command = "delete_messages", event_ids = ids });
@@ -863,7 +902,7 @@ public sealed partial class MainWindow : Window
     {
         if (_snapshot?.SelectedChat is not ChatModel chat) return;
         var menu = new MenuFlyout();
-        menu.Items.Add(MenuItem(chat.IsGroup ? "Информация о группе" : "Профиль", "", ShowProfile));
+        menu.Items.Add(MenuItem(chat.IsChannel ? "Информация о канале" : chat.IsGroup ? "Информация о группе" : "Профиль", "", ShowProfile));
         menu.Items.Add(MenuItem(chat.MuteMenuLabel, "", async () =>
             await ExecuteAsync(new { command = "set_chat_muted", user_id = chat.UserId, muted = !chat.Muted })));
         menu.Items.Add(MenuItem(chat.PinMenuLabel, "", async () =>
@@ -895,6 +934,11 @@ public sealed partial class MainWindow : Window
     private void ShowProfile()
     {
         if (_snapshot?.SelectedChat is not ChatModel chat) return;
+        if (chat.IsChannel)
+        {
+            ShowChannelPage();
+            return;
+        }
         if (chat.IsGroup)
         {
             ShowGroupPage();
@@ -940,6 +984,8 @@ public sealed partial class MainWindow : Window
         if (_snapshot?.SelectedChat is not ChatModel chat || !await ConfirmDeleteChatAsync(chat)) return;
         ProfilePage.Visibility = Visibility.Collapsed;
         GroupPage.Visibility = Visibility.Collapsed;
+        ChannelPage.Visibility = Visibility.Collapsed;
+        CommentsPage.Visibility = Visibility.Collapsed;
         await ExecuteAsync(new { command = "delete_contact", user_id = id });
     }
 

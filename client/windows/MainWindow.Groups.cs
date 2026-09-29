@@ -26,11 +26,13 @@ public sealed partial class MainWindow
         var menu = new MenuFlyout();
         menu.Items.Add(MenuItem("Новый диалог", "", () => NewContact_Click(sender, e)));
         menu.Items.Add(MenuItem("Новая группа", "", ShowNewGroupDialog));
+        menu.Items.Add(MenuItem("Новый канал", "\uE789", ShowNewChannelDialog));
+        menu.Items.Add(MenuItem("Подписаться на канал", "\uE71B", ShowSubscribeDialog));
         menu.ShowAt((FrameworkElement)sender);
     }
 
     private IEnumerable<ChatModel> AcceptedContacts() =>
-        _snapshot?.Chats.Where(chat => !chat.IsGroup && !chat.PendingApproval) ?? [];
+        _snapshot?.Chats.Where(chat => !chat.IsGroup && !chat.IsChannel && !chat.PendingApproval) ?? [];
 
     private async void ShowNewGroupDialog()
     {
@@ -331,9 +333,27 @@ public sealed partial class MainWindow
 
     // --- общие пункты меню чата -----------------------------------------------
 
-    /// <summary>У группы, кроме удаления, есть выход без потери истории.</summary>
+    /// <summary>У группы и канала, кроме удаления, есть выход без потери истории.</summary>
     private void AddDeleteChatItems(MenuFlyout menu, ChatModel chat)
     {
+        if (chat.IsChannel)
+        {
+            if (chat is { GroupLeft: false, PendingApproval: false } && chat.ChannelRole != "owner")
+            {
+                menu.Items.Add(MenuItem("Отписаться", string.Empty, async () =>
+                {
+                    if (await ConfirmAsync("Отписаться от канала?",
+                            "История останется на этом устройстве, но новые посты приходить не будут."))
+                        await ExecuteAsync(new { command = "leave_channel", channel_id = chat.UserId });
+                }));
+            }
+            menu.Items.Add(MenuItem("Удалить канал", string.Empty, async () =>
+            {
+                if (await ConfirmDeleteChatAsync(chat))
+                    await ExecuteAsync(new { command = "delete_contact", user_id = chat.UserId });
+            }));
+            return;
+        }
         if (chat is { IsGroup: true, GroupLeft: false, PendingApproval: false })
         {
             menu.Items.Add(MenuItem("Покинуть группу", string.Empty, async () =>
@@ -349,7 +369,13 @@ public sealed partial class MainWindow
         }));
     }
 
-    private Task<bool> ConfirmDeleteChatAsync(ChatModel chat) => !chat.IsGroup
+    private Task<bool> ConfirmDeleteChatAsync(ChatModel chat) => chat.IsChannel
+        ? ConfirmAsync("Удалить канал?", chat.ChannelRole == "owner" && !chat.GroupLeft
+            ? "Вы владелец: сначала передайте канал другому администратору или удалите его у всех на странице канала."
+            : chat.GroupLeft || chat.PendingApproval
+                ? "История канала будет удалена с этого устройства."
+                : "Вы отпишетесь, а история канала будет удалена с этого устройства.")
+        : !chat.IsGroup
         ? ConfirmAsync("Удалить диалог?", "Локальная история этого диалога будет удалена.")
         : ConfirmAsync("Удалить группу?", chat.GroupLeft || chat.PendingApproval
             ? "История группы будет удалена с этого устройства."

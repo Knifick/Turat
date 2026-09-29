@@ -54,21 +54,26 @@ public sealed record ChatModel(
     bool IsGroup = false,
     int MemberCount = 0,
     string? GroupRole = null,
-    bool GroupLeft = false)
+    bool GroupLeft = false,
+    bool IsChannel = false,
+    string? ChannelRole = null,
+    bool ChannelCanPost = false)
 {
     [JsonIgnore] public string Initials => Formatting.Initials(DisplayName);
     [JsonIgnore] public Brush AvatarBrush => AvatarPalette.For(UserId);
     [JsonIgnore] public string TimeLabel => Formatting.ChatListTime(LastActivityUnixMilliseconds);
     [JsonIgnore] public Visibility GroupVisibility => IsGroup ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility ChannelVisibility => IsChannel ? Visibility.Visible : Visibility.Collapsed;
 
-    /// <summary>Писать можно: диалог принят, а из группы пользователь не вышел.</summary>
-    [JsonIgnore] public bool CanWrite => !PendingApproval && !GroupLeft;
+    /// <summary>Писать можно: диалог принят, из группы не вышли, а в канале есть право публикации.</summary>
+    [JsonIgnore] public bool CanWrite => !PendingApproval && !GroupLeft && (!IsChannel || ChannelCanPost);
 
     [JsonIgnore]
     public string PreviewText => Draft.Length > 0
         ? Draft
-        : PendingApproval ? (IsGroup ? "Приглашение в группу" : "Хочет начать диалог")
+        : PendingApproval ? (IsChannel ? "Приглашение в канал" : IsGroup ? "Приглашение в группу" : "Хочет начать диалог")
         : Preview.Length > 0 ? Preview
+        : IsChannel ? Formatting.Subscribers(MemberCount)
         : IsGroup ? Formatting.Members(MemberCount)
         : Username is null ? Formatting.ShortId(UserId) : "@" + Username;
 
@@ -97,7 +102,9 @@ public sealed record ChatModel(
         HasLastMessage && LastMessageOutgoing && LastMessageDelivered ? Visibility.Visible : Visibility.Collapsed;
 
     [JsonIgnore]
-    public string Presence => !IsGroup
+    public string Presence => IsChannel
+        ? GroupLeft ? "вы не подписаны" : PendingApproval ? "приглашение в канал" : Formatting.Subscribers(MemberCount)
+        : !IsGroup
         ? Formatting.Presence(PendingApproval, LastSeenUnixMilliseconds)
         : GroupLeft ? "вы не участник группы"
         : PendingApproval ? "приглашение в группу"
@@ -173,9 +180,36 @@ public sealed record MessageModel(
     string? ReplyToEventId,
     string? ForwardedFrom,
     bool Service = false,
-    string? SenderName = null) : INotifyPropertyChanged
+    string? SenderName = null,
+    ChannelPostInfoModel? ChannelPost = null) : INotifyPropertyChanged
 {
     private ImageSource? _preview;
+
+    /// <summary>Пост канала: у всех, включая автора, рисуется слева, как в Telegram.</summary>
+    [JsonIgnore] public bool AsPost { get; set; }
+
+    /// <summary>Кнопка комментариев видна, когда они включены в канале или уже есть.</summary>
+    [JsonIgnore] public bool ShowComments { get; set; }
+
+    [JsonIgnore]
+    public Visibility ChannelPostVisibility =>
+        ChannelPost is not null && !Deleted ? Visibility.Visible : Visibility.Collapsed;
+
+    [JsonIgnore] public string ChannelViewsLabel => ChannelPost is null ? string.Empty : "👁 " + Formatting.Compact(ChannelPost.Views);
+
+    [JsonIgnore]
+    public string ChannelReactionsLabel => ChannelPost is null
+        ? string.Empty
+        : string.Join("   ", ChannelPost.Reactions.Select(value => $"{value.Reaction} {value.Count}"));
+
+    [JsonIgnore]
+    public string CommentsLabel => ChannelPost is null || ChannelPost.Comments == 0
+        ? "Прокомментировать"
+        : Formatting.Comments(ChannelPost.Comments);
+
+    [JsonIgnore]
+    public Visibility CommentsVisibility =>
+        ShowComments || ChannelPost is { Comments: > 0 } ? Visibility.Visible : Visibility.Collapsed;
 
     /// <summary>Имя автора над первым пузырём подряд в группе; заполняется окном.</summary>
     [JsonIgnore] public bool ShowSender { get; set; }
@@ -359,7 +393,9 @@ public sealed record AppSnapshot(
     bool OnboardingRequired,
     string SearchQuery,
     IReadOnlyList<SearchHitModel> SearchResults,
-    GroupViewModel? Group = null)
+    GroupViewModel? Group = null,
+    ChannelViewModel? Channel = null,
+    IReadOnlyList<MessageModel>? Comments = null)
 {
     [JsonIgnore] public ChatModel? SelectedChat => Chats.FirstOrDefault(value => value.UserId == SelectedContactId);
 }
@@ -429,6 +465,107 @@ public sealed record GroupViewModel(
     bool CanRemoveMembers,
     bool CanManageAdmins,
     bool CanDeleteMessages);
+
+public sealed record ReactionCountModel(string Reaction, int Count, bool Mine);
+
+/// <summary>Просмотры, комментарии и реакции поста канала.</summary>
+public sealed record ChannelPostInfoModel(int Views, int Comments, IReadOnlyList<ReactionCountModel> Reactions);
+
+/// <summary>Права администратора канала — те же семь, что в Telegram.</summary>
+public sealed record ChannelRightsModel(
+    bool PostMessages = false,
+    bool EditMessages = false,
+    bool DeleteMessages = false,
+    bool InviteUsers = false,
+    bool ChangeInfo = false,
+    bool BanUsers = false,
+    bool AddAdmins = false)
+{
+    [JsonIgnore]
+    public string Summary
+    {
+        get
+        {
+            var parts = new List<string>();
+            if (PostMessages) parts.Add("публикует");
+            if (EditMessages) parts.Add("правит");
+            if (DeleteMessages) parts.Add("удаляет");
+            if (InviteUsers) parts.Add("приглашает");
+            if (ChangeInfo) parts.Add("меняет данные");
+            if (BanUsers) parts.Add("блокирует");
+            if (AddAdmins) parts.Add("назначает админов");
+            return parts.Count == 0 ? "без прав" : string.Join(", ", parts);
+        }
+    }
+}
+
+public sealed record ChannelSettingsModel(
+    bool SignPosts,
+    bool CommentsEnabled,
+    string? DiscussionGroupId,
+    string DiscussionGroupName);
+
+public sealed record ChannelAdminModel(
+    string UserId,
+    string DisplayName,
+    string? AvatarBase64,
+    string Role,
+    ChannelRightsModel Rights,
+    string Title,
+    bool IsSelf,
+    string AddedByName,
+    bool CanEdit);
+
+public sealed record ChannelSubscriberModel(
+    string UserId,
+    string DisplayName,
+    string? AvatarBase64,
+    bool IsContact,
+    bool Banned,
+    long SubscribedAtUnixMilliseconds);
+
+/// <summary>Карточка открытого канала и права текущего пользователя в нём — их считает ядро.</summary>
+public sealed record ChannelViewModel(
+    string ChannelId,
+    string Name,
+    string About,
+    string? AvatarBase64,
+    long Epoch,
+    string? MyRole,
+    ChannelRightsModel MyRights,
+    bool AwaitingState,
+    bool PendingInvite,
+    string? InvitedByName,
+    bool Left,
+    bool Removed,
+    bool Closed,
+    ChannelSettingsModel Settings,
+    bool DiscussionJoined,
+    int SubscriberCount,
+    IReadOnlyList<ChannelAdminModel> Admins,
+    IReadOnlyList<ChannelSubscriberModel> Subscribers,
+    string? InviteLink,
+    bool CanPost,
+    bool CanEditInfo,
+    bool CanInvite,
+    bool CanBan,
+    bool CanAddAdmins,
+    bool CanDeleteMessages,
+    bool CanEditMessages,
+    bool CanComment,
+    bool CanReact,
+    string? ThreadPostEventId)
+{
+    [JsonIgnore] public bool Active => !AwaitingState && !PendingInvite && !Left && !Removed && !Closed;
+
+    [JsonIgnore]
+    public string StateLabel => Closed ? "канал удалён"
+        : Removed ? "вас удалили из канала"
+        : AwaitingState ? "ждём ответа администратора"
+        : PendingInvite ? "приглашение в канал"
+        : Left ? "вы отписались"
+        : Formatting.Subscribers(SubscriberCount);
+}
 
 /// <summary>Найденное сообщение в глобальном поиске.</summary>
 public sealed record SearchHitModel(
@@ -558,6 +695,39 @@ internal static class Formatting
             : "участников";
         return $"{count} {word}";
     }
+
+    /// <summary>«1 подписчик», «3 подписчика», «11 подписчиков».</summary>
+    public static string Subscribers(int count)
+    {
+        int tens = count % 100;
+        int units = count % 10;
+        string word = tens is >= 11 and <= 14 ? "подписчиков"
+            : units == 1 ? "подписчик"
+            : units is >= 2 and <= 4 ? "подписчика"
+            : "подписчиков";
+        return $"{count} {word}";
+    }
+
+    /// <summary>«1 комментарий», «2 комментария», «5 комментариев».</summary>
+    public static string Comments(int count)
+    {
+        int tens = count % 100;
+        int units = count % 10;
+        string word = tens is >= 11 and <= 14 ? "комментариев"
+            : units == 1 ? "комментарий"
+            : units is >= 2 and <= 4 ? "комментария"
+            : "комментариев";
+        return $"{count} {word}";
+    }
+
+    /// <summary>Компактное число просмотров, как в Telegram: 950, 1,2K, 34K.</summary>
+    public static string Compact(int value) => value switch
+    {
+        >= 1_000_000 => (value / 1_000_000d).ToString("0.#") + "M",
+        >= 10_000 => (value / 1000) + "K",
+        >= 1_000 => (value / 1000d).ToString("0.#") + "K",
+        _ => value.ToString(),
+    };
 
     public static bool IsOnline(long? lastSeen) =>
         lastSeen is long value && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - value < 90_000;
