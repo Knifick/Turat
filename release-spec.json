@@ -1,7 +1,7 @@
 {
   "channel": "stable",
-  "sequence": 9,
-  "releaseVersion": "3.3.0",
+  "sequence": 10,
+  "releaseVersion": "3.4.0",
   "notesUrl": "/updates/stable/notes.html",
   "expiresDays": 90,
   "artifacts": [

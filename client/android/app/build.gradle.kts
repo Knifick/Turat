@@ -12,8 +12,8 @@ android {
         applicationId = "app.turattext.mobile"
         minSdk = 23
         targetSdk = 36
-        versionCode = 30300
-        versionName = "3.3.0"
+        versionCode = 30400
+        versionName = "3.4.0"
     }
 
     buildFeatures {
