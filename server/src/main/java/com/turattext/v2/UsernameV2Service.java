@@ -3,7 +3,9 @@ package com.turattext.v2;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.turattext.common.BadRequestException;
+import com.turattext.common.ConflictException;
 import com.turattext.common.NotFoundException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -46,14 +48,30 @@ public class UsernameV2Service {
         }
 
         Instant now = Instant.now();
+        // Один username — одна учётная запись на этом Node. Чужая живая запись имя не
+        // отдаёт; истёкшая (владелец больше месяца не появлялся) освобождает его.
+        Integer holders = jdbc.queryForObject("""
+                select count(*) from v2_username_claims
+                where normalized_username = ? and user_id <> ? and expires_at > ?
+                """, Integer.class, username, request.userId(), timestamp(now));
+        if (holders != null && holders > 0) {
+            throw new ConflictException("Username is already taken on this node");
+        }
+        jdbc.update("delete from v2_username_claims where normalized_username = ? and user_id <> ?",
+                username, request.userId());
         jdbc.update("delete from v2_username_claims where user_id = ?", request.userId());
-        jdbc.update("""
-                insert into v2_username_claims(
-                    normalized_username, user_id, identity_public_key, sequence_number,
-                    claim_json, signature, expires_at, updated_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?)
-                """, username, request.userId(), request.identityPublicKey(), request.sequence(),
-                request.claimJson(), request.signature(), timestamp(request.expiresAt()), timestamp(now));
+        try {
+            jdbc.update("""
+                    insert into v2_username_claims(
+                        normalized_username, user_id, identity_public_key, sequence_number,
+                        claim_json, signature, expires_at, updated_at)
+                    values (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, username, request.userId(), request.identityPublicKey(), request.sequence(),
+                    request.claimJson(), request.signature(), timestamp(request.expiresAt()), timestamp(now));
+        } catch (DuplicateKeyException exception) {
+            // Два одновременных захвата одного имени: второй проигрывает.
+            throw new ConflictException("Username is already taken on this node");
+        }
 
         String payloadHash = V2Encoding.sha256Hex(request.claimJson().getBytes(StandardCharsets.UTF_8));
         String operationId = "op1-" + V2Encoding.randomToken(18);

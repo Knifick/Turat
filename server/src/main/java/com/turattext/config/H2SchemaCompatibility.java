@@ -168,5 +168,30 @@ public class H2SchemaCompatibility implements ApplicationRunner {
                     updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
                     PRIMARY KEY(normalized_username, user_id))
                 """);
+        jdbcTemplate.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_v2_username_claims_name ON v2_username_claims(normalized_username)");
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS v2_accounts (
+                    account_id VARCHAR(40) PRIMARY KEY,
+                    login_lookup VARCHAR(64) NOT NULL UNIQUE,
+                    recovery_lookup VARCHAR(64) NOT NULL UNIQUE,
+                    password_salt VARCHAR(64) NOT NULL,
+                    password_verifier VARCHAR(64) NOT NULL,
+                    recovery_verifier VARCHAR(64) NOT NULL,
+                    access_verifier VARCHAR(64) NOT NULL,
+                    password_wrapped_key CHARACTER LARGE OBJECT NOT NULL,
+                    recovery_wrapped_key CHARACTER LARGE OBJECT NOT NULL,
+                    vault CHARACTER LARGE OBJECT NOT NULL,
+                    vault_version BIGINT NOT NULL,
+                    snapshot BINARY LARGE OBJECT,
+                    snapshot_version BIGINT DEFAULT 0 NOT NULL,
+                    snapshot_updated_at TIMESTAMP WITH TIME ZONE,
+                    failed_attempts INTEGER DEFAULT 0 NOT NULL,
+                    locked_until TIMESTAMP WITH TIME ZONE,
+                    recovery_failed_attempts INTEGER DEFAULT 0 NOT NULL,
+                    recovery_locked_until TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL)
+                """);
     }
 }
