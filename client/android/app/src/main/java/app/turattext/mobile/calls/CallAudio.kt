@@ -1,6 +1,7 @@
 package app.turattext.mobile.calls
 
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
@@ -16,12 +17,12 @@ import android.media.RingtoneManager
 import android.media.ToneGenerator
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
-import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -163,7 +164,9 @@ internal class CallAudio(context: Context) {
                 SampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minimum, FrameSamples * 2 * 4),
+                // Запас на 200 мс: если поток записи на миг задержится (сборка мусора, смена
+                // маршрута звука), система не потеряет отсчёты — разрыв в них слышен треском.
+                maxOf(minimum, FrameSamples * 2 * 10),
             )
         } catch (error: Exception) {
             Log.w(Tag, "Микрофон недоступен", error)
@@ -174,10 +177,13 @@ internal class CallAudio(context: Context) {
             record.release()
             return
         }
+        // Автоусиление (AGC) сверх системной обработки не включаем: в тишине оно поднимает
+        // остаток эха и шум до громкости речи, и на громкой связи звук начинает «заводиться» —
+        // отсюда нарастающие резкие шумы у собеседника. Источник VOICE_COMMUNICATION уже
+        // выравнивает громкость сам.
         val effects = buildList<AudioEffect> {
             if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(record.audioSessionId)?.let(::add)
             if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(record.audioSessionId)?.let(::add)
-            if (AutomaticGainControl.isAvailable()) AutomaticGainControl.create(record.audioSessionId)?.let(::add)
         }
         effects.forEach { runCatching { it.enabled = true } }
         val frame = ShortArray(FrameSamples)
@@ -265,7 +271,13 @@ internal class CallAudio(context: Context) {
     }
 }
 
-/** Звонок входящего вызова и вибрация — с учётом беззвучного режима телефона. */
+/**
+ * Мелодия и вибрация входящего вызова.
+ *
+ * Мелодия играет только в обычном режиме звука. Вибрация — в любом режиме, в том числе
+ * «Без звука»: пропустить звонок только потому, что телефон беззвучный, обидно. Исключение
+ * одно — «Не беспокоить»: тогда звонок лишь показывается на экране, без звука и вибрации.
+ */
 internal class Ringer(private val context: Context) {
     private var ringtone: Ringtone? = null
     private var vibrator: Vibrator? = null
@@ -281,7 +293,8 @@ internal class Ringer(private val context: Context) {
     }
 
     fun start() {
-        if (ringtone != null) return
+        if (ringtone != null || vibrator != null) return
+        if (doNotDisturb()) return
         val audio = context.getSystemService(AudioManager::class.java)
         val mode = audio.ringerMode
         if (mode == AudioManager.RINGER_MODE_NORMAL) {
@@ -297,23 +310,54 @@ internal class Ringer(private val context: Context) {
             }
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) main.postDelayed(loop, 1_000)
         }
-        if (mode != AudioManager.RINGER_MODE_SILENT) {
-            val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                context.getSystemService(VibratorManager::class.java)?.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                context.getSystemService(Vibrator::class.java)
-            }
-            vibrator = device?.takeIf { it.hasVibrator() }?.also {
-                val pattern = longArrayOf(0, 700, 900)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    it.vibrate(VibrationEffect.createWaveform(pattern, 0))
-                } else {
+        vibrate(silent = mode == AudioManager.RINGER_MODE_SILENT)
+    }
+
+    /** Включён ли «Не беспокоить» — в любом его виде (только важные, только будильники, полная тишина). */
+    private fun doNotDisturb(): Boolean {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        val filter = manager.currentInterruptionFilter
+        return filter != NotificationManager.INTERRUPTION_FILTER_ALL &&
+            filter != NotificationManager.INTERRUPTION_FILTER_UNKNOWN
+    }
+
+    /**
+     * Вибрация вызова. Назначение важно: вибрацию «мелодии» и уведомлений система глушит в
+     * режиме «Без звука», а вибрацию приложения в фоне без назначения — всегда. Поэтому вызов
+     * помечен как запрос на связь, а в беззвучном режиме — как будильник: эту вибрацию режим
+     * «Без звука» не отключает. «Не беспокоить» проверено выше.
+     */
+    private fun vibrate(silent: Boolean) {
+        val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            context.getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Vibrator::class.java)
+        }
+        val target = device?.takeIf { it.hasVibrator() } ?: return
+        val pattern = longArrayOf(0, 700, 900)
+        val legacyUsage = if (silent) AudioAttributes.USAGE_ALARM else AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_REQUEST
+        val legacyAttributes = AudioAttributes.Builder()
+            .setUsage(legacyUsage)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+        runCatching {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> target.vibrate(
+                    VibrationEffect.createWaveform(pattern, 0),
+                    VibrationAttributes.createForUsage(
+                        if (silent) VibrationAttributes.USAGE_ALARM else VibrationAttributes.USAGE_COMMUNICATION_REQUEST,
+                    ),
+                )
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ->
+                    target.vibrate(VibrationEffect.createWaveform(pattern, 0), legacyAttributes)
+                else -> {
                     @Suppress("DEPRECATION")
-                    it.vibrate(pattern, 0)
+                    target.vibrate(pattern, 0, legacyAttributes)
                 }
             }
-        }
+            vibrator = target
+        }.onFailure { Log.w("TuratCall", "Вибрация вызова недоступна", it) }
     }
 
     fun stop() {

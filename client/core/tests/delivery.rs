@@ -556,6 +556,9 @@ fn a_voice_call_connects_and_carries_audio_both_ways() {
     let status = alice.core.call_status();
     assert!(status["durationMs"].as_i64().unwrap() > 3_000, "{status}");
     assert!(status["rttMs"].as_u64().unwrap() < 500, "{status}");
+    // Ровная связь показывается как хорошая у обоих — индикатор не копит заминки начала звонка.
+    assert_eq!(status["quality"], "good", "{status}");
+    assert_eq!(bob.core.call_status()["quality"], "good", "{}", bob.core.call_status());
 
     // Сброс у Алисы: Боб узнаёт мгновенно, по медиаканалу.
     assert!(alice.core.call_action("hangup"));

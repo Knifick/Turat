@@ -19,7 +19,7 @@ use std::{
 };
 
 use super::{
-    audio::{Encoder, FRAME_SAMPLES, JitterBuffer, JitterStats, level},
+    audio::{Encoder, FRAME_SAMPLES, JitterBuffer, level},
     crypto::{CallKeys, ReplayWindow},
     transport::{
         DATA, HEADER_BYTES, JOINED, Link, ROOM_BYTES, RelayTicket, UdpLink, WebSocketLink, header,
@@ -41,6 +41,9 @@ const STALL_TIMEOUT: Duration = Duration::from_millis(2_500);
 const KEEPALIVE: Duration = Duration::from_millis(600);
 const PING_EVERY: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(4);
+/// Кадр, пролежавший в очереди дольше, уже не нужен собеседнику: пока канал
+/// переподключался, звук устарел, и отправить его пачкой значило бы добавить ему задержку.
+const STALE_FRAME: Duration = Duration::from_millis(250);
 
 pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -52,8 +55,8 @@ pub struct CallMedia {
     side: u8,
     token: [u8; 32],
     ticket: RelayTicket,
-    outgoing: Mutex<Sender<Vec<u8>>>,
-    receiver: Mutex<Option<Receiver<Vec<u8>>>>,
+    outgoing: Mutex<Sender<Queued>>,
+    receiver: Mutex<Option<Receiver<Queued>>>,
     encoder: Mutex<Encoder>,
     jitter: Mutex<JitterBuffer>,
     replay: Mutex<ReplayWindow>,
@@ -188,21 +191,25 @@ impl CallMedia {
         f32::from_bits(self.peer_level.load(Ordering::Relaxed))
     }
 
-    pub fn stats(&self) -> JitterStats {
-        self.jitter.lock().map(|jitter| jitter.stats).unwrap_or_default()
+    /// Доля дорисованных кадров за последние секунды.
+    fn recent_damage(&self) -> f64 {
+        self.jitter.lock().map(|jitter| jitter.recent_damage()).unwrap_or(0.0)
     }
 
-    /// Оценка связи для значка в интерфейсе.
+    /// Оценка связи для значка в интерфейсе — по тому, что слышно последние пять секунд.
+    ///
+    /// Раньше доля потерь считалась за весь звонок и включала пакеты, выброшенные буфером
+    /// как опоздавшие, — одна заминка в начале разговора держала значок «плохо» до конца.
+    /// Задержка здесь — полный круг через ретранслятор (туда и обратно, через обоих
+    /// собеседников), поэтому пороги вдвое выше привычных для односторонней задержки.
     pub fn quality(&self) -> &'static str {
-        let stats = self.stats();
         let rtt = self.rtt_ms.load(Ordering::Relaxed);
-        let total = stats.received.max(1) as f64;
-        let damaged = (stats.concealed + stats.late) as f64 / total;
+        let damaged = self.recent_damage();
         let last_peer = self.last_peer_ms.load(Ordering::Relaxed);
         let silent = last_peer > 0 && now_ms() - last_peer > 2_000;
-        if silent || damaged > 0.08 || rtt > 600 {
+        if silent || damaged > 0.10 || rtt > 900 {
             "poor"
-        } else if damaged > 0.02 || rtt > 300 {
+        } else if damaged > 0.03 || rtt > 450 {
             "fair"
         } else {
             "good"
@@ -217,7 +224,10 @@ impl CallMedia {
         frame.extend_from_slice(&header);
         frame.extend_from_slice(&sealed);
         if let Ok(sender) = self.outgoing.lock() {
-            let _ = sender.send(frame);
+            let _ = sender.send(Queued {
+                at: Instant::now(),
+                frame,
+            });
         }
     }
 
@@ -227,7 +237,7 @@ impl CallMedia {
         }
     }
 
-    fn run(self: Arc<Self>, receiver: Receiver<Vec<u8>>) {
+    fn run(self: Arc<Self>, receiver: Receiver<Queued>) {
         let udp_available = self.ticket.udp_host.is_some() && self.ticket.udp_port > 0;
         let mut prefer_udp = udp_available;
         let mut backoff = Duration::from_millis(200);
@@ -267,7 +277,7 @@ impl CallMedia {
         drop(receiver);
     }
 
-    fn session(&self, mut link: Box<dyn Link>, receiver: &Receiver<Vec<u8>>) -> Outcome {
+    fn session(&self, mut link: Box<dyn Link>, receiver: &Receiver<Queued>) -> Outcome {
         let join = join_frame(&self.room, self.side, &self.token);
         let started = Instant::now();
         let mut joined = false;
@@ -279,8 +289,8 @@ impl CallMedia {
         loop {
             if self.stopped() {
                 // Последние кадры (сигнал завершения) уходят перед выходом.
-                while let Ok(frame) = receiver.try_recv() {
-                    let _ = link.send(&frame);
+                while let Ok(queued) = receiver.try_recv() {
+                    let _ = link.send(&queued.frame);
                 }
                 return Outcome::Stopped;
             }
@@ -298,8 +308,11 @@ impl CallMedia {
                 return Outcome::Worked;
             }
             if joined {
-                while let Ok(frame) = receiver.try_recv() {
-                    if link.send(&frame).is_err() {
+                while let Ok(queued) = receiver.try_recv() {
+                    if queued.at.elapsed() > STALE_FRAME {
+                        continue;
+                    }
+                    if link.send(&queued.frame).is_err() {
                         return Outcome::Worked;
                     }
                 }
@@ -368,9 +381,8 @@ impl CallMedia {
                 let sent = i64::from_be_bytes(plain[1..9].try_into().expect("8 bytes"));
                 let rtt = (now - sent).clamp(0, 60_000) as u32;
                 self.rtt_ms.store(rtt, Ordering::Relaxed);
-                // Чем хуже сеть, тем больше избыточности кладёт кодер.
-                let stats = self.stats();
-                let loss = ((stats.concealed + stats.recovered) * 100 / stats.received.max(1) + 5) as i32;
+                // Чем хуже сеть сейчас, тем больше избыточности кладёт кодер.
+                let loss = (self.recent_damage() * 100.0).round() as i32 + 5;
                 if let Ok(mut encoder) = self.encoder.lock() {
                     encoder.set_expected_loss(loss);
                 }
@@ -379,6 +391,12 @@ impl CallMedia {
             _ => {}
         }
     }
+}
+
+/// Зашифрованный кадр в очереди отправки вместе с моментом, когда он появился.
+struct Queued {
+    at: Instant,
+    frame: Vec<u8>,
 }
 
 enum Outcome {

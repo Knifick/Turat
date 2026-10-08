@@ -9,7 +9,7 @@
 //! растёт, когда кадры опаздывают, и плавно сокращается на стабильной сети: голос не
 //! прерывается и не копит лишнюю задержку.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use unsafe_libopus::{
     OPUS_APPLICATION_VOIP, OPUS_SET_BITRATE_REQUEST, OPUS_SET_COMPLEXITY_REQUEST,
@@ -24,9 +24,6 @@ use crate::CoreError;
 pub const SAMPLE_RATE: i32 = 48_000;
 pub const FRAME_SAMPLES: usize = 960;
 const MAX_PACKET_BYTES: usize = 400;
-const MIN_DEPTH: usize = 2;
-const MAX_DEPTH: usize = 12;
-const START_DEPTH: usize = 3;
 
 pub struct Encoder(*mut OpusEncoder);
 
@@ -115,29 +112,67 @@ impl Drop for Decoder {
     }
 }
 
-/// Счётчики качества приёма — для индикатора связи в интерфейсе.
+//// Счётчики качества приёма — для индикатора связи в интерфейсе.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JitterStats {
     pub received: u64,
+    /// Потерянный кадр восстановлен по избыточности следующего пакета.
     pub recovered: u64,
+    /// Кадр «дорисован» декодером: пакет потерялся или ещё не пришёл.
     pub concealed: u64,
+    /// Пакет пришёл, когда его место уже было проиграно.
     pub late: u64,
+    /// Кадры, срезанные ради меньшей задержки.
+    pub trimmed: u64,
     pub depth_frames: usize,
     pub target_frames: usize,
 }
 
+/// Запас, который буфер держит сверх проигрываемого кадра, — в кадрах по 20 мс.
+const MIN_SPARE: usize = 1;
+const START_SPARE: usize = 2;
+const MAX_SPARE: usize = 10;
+/// Пакетов накопилось на полсекунды и больше — звук отстал, догоняем рывком.
+const MAX_BACKLOG: usize = 25;
+/// Сколько подряд «дорисовывать» звук в ожидании опоздавшего пакета; дальше — тишина.
+const CONCEAL_LIMIT: u32 = 10;
+/// Собеседник молчит секунду: буферизация начнётся заново, когда звук вернётся.
+const RESTART_AFTER: u32 = 50;
+/// Окно, по которому решается, можно ли срезать задержку: 2 секунды.
+const TRIM_WINDOW: u32 = 100;
+/// Столько ровной работы без провалов — и запас можно уменьшить: 10 секунд.
+const CALM_FRAMES: u32 = 500;
+/// Перекрёстный переход при срезе задержки: 10 мс, чтобы срез не щёлкал.
+const CROSSFADE_SAMPLES: usize = 480;
+/// Качество связи считается по последним секундам, а не за весь звонок.
+const QUALITY_SECONDS: usize = 5;
+
+/// Джиттер-буфер с подстройкой под сеть.
+///
+/// Главное правило: опоздавший пакет ждём, а не выбрасываем. Если буфер опустел, декодер
+/// «дорисовывает» 20 мс, но номер ожидаемого кадра не сдвигается: пришедший следом пакет
+/// проигрывается целиком, а запас буфера сам вырастает на величину опоздания. Прежний
+/// буфер в такой ситуации дорисовывал кадр, сдвигался дальше и выбрасывал настоящий пакет
+/// как опоздавший — на неровной сети (мобильная связь, Wi-Fi, кадры пачками от аудио-HAL)
+/// это давало непрерывное «дорисовывание» с металлическим треском и ложный «плохой сигнал».
+///
+/// Лишняя задержка срезается по 40 мс с перекрёстным переходом и только тогда, когда за
+/// последние две секунды запас ни разу не опускался до нужного.
 pub struct JitterBuffer {
     frames: BTreeMap<u32, Vec<u8>>,
     next: Option<u32>,
-    target: usize,
     decoder: Decoder,
-    /// Подряд не пришедшие кадры: долгий провал лучше пережить тишиной, чем «роботом».
-    missing_streak: u32,
-    /// Окно наблюдения для подстройки запаса.
-    window_frames: u32,
-    window_underruns: u32,
-    window_min_depth: usize,
-    calm_windows: u32,
+    /// Желаемый запас кадров сверх проигрываемого.
+    spare: usize,
+    /// Подряд выданные кадры при пустом буфере.
+    waiting: u32,
+    trim_frames: u32,
+    trim_min_depth: usize,
+    calm_frames: u32,
+    /// Последние секунды: (выдано кадров, из них дорисовано).
+    seconds: VecDeque<(u32, u32)>,
+    second_frames: u32,
+    second_damaged: u32,
     pub stats: JitterStats,
 }
 
@@ -146,15 +181,17 @@ impl JitterBuffer {
         Ok(Self {
             frames: BTreeMap::new(),
             next: None,
-            target: START_DEPTH,
             decoder: Decoder::new()?,
-            missing_streak: 0,
-            window_frames: 0,
-            window_underruns: 0,
-            window_min_depth: usize::MAX,
-            calm_windows: 0,
+            spare: START_SPARE,
+            waiting: 0,
+            trim_frames: 0,
+            trim_min_depth: usize::MAX,
+            calm_frames: 0,
+            seconds: VecDeque::with_capacity(QUALITY_SECONDS + 1),
+            second_frames: 0,
+            second_damaged: 0,
             stats: JitterStats {
-                target_frames: START_DEPTH,
+                target_frames: START_SPARE + 1,
                 ..JitterStats::default()
             },
         })
@@ -176,11 +213,26 @@ impl JitterBuffer {
         self.frames.insert(index, packet);
     }
 
+    /// Кадры, которые ещё предстоит проиграть, включая ожидаемый.
     fn depth(&self) -> usize {
         match self.next {
             Some(next) => self.frames.range(next..).count(),
             None => self.frames.len(),
         }
+    }
+
+    /// Доля дорисованных кадров за последние секунды, 0..1.
+    pub fn recent_damage(&self) -> f64 {
+        let (frames, damaged) = self
+            .seconds
+            .iter()
+            .fold((self.second_frames, self.second_damaged), |(f, d), &(sf, sd)| {
+                (f + sf, d + sd)
+            });
+        if frames < 25 {
+            return 0.0;
+        }
+        f64::from(damaged) / f64::from(frames)
     }
 
     /// Следующие 20 мс для динамика.
@@ -190,7 +242,7 @@ impl JitterBuffer {
             None => {
                 // Запускаемся, только накопив запас: иначе первые же доли секунды
                 // сетевой неровности превратились бы в щелчки.
-                if self.frames.len() < self.target {
+                if self.frames.len() < self.spare + 1 {
                     output.fill(0);
                     return;
                 }
@@ -206,74 +258,134 @@ impl JitterBuffer {
         }
 
         let depth = self.depth();
-        self.window_min_depth = self.window_min_depth.min(depth);
+        self.trim_min_depth = self.trim_min_depth.min(depth);
+        if depth > MAX_BACKLOG {
+            // Звук отстал на полсекунды и больше (например, после переподключения):
+            // оставляем нужный запас и догоняем сразу, а не по кадру в секунду.
+            let keep = self.spare + 1;
+            let skip_to = *self.frames.keys().nth(depth - keep).expect("depth counted");
+            self.frames.retain(|&index, _| index >= skip_to);
+            self.stats.trimmed += (depth - keep) as u64;
+            self.next = Some(skip_to);
+            self.trim_min_depth = usize::MAX;
+            return self.pull(output);
+        }
+
+        let mut damaged = false;
         if let Some(packet) = self.frames.remove(&next) {
             self.decoder.decode(Some(&packet), false, output);
-            self.missing_streak = 0;
-        } else if let Some(following) = self.frames.get(&(next + 1)).cloned() {
-            self.decoder.decode(Some(&following), true, output);
-            self.stats.recovered += 1;
-            self.missing_streak = 0;
-        } else {
-            self.window_underruns += 1;
-            self.missing_streak += 1;
-            if self.missing_streak <= 10 {
+            self.waiting = 0;
+            self.next = Some(next.wrapping_add(1));
+        } else if self.frames.range(next..).next().is_some() {
+            // Следующие пакеты уже здесь, а этого нет — он потерян, ждать бессмысленно:
+            // восстанавливаем по избыточности соседа или дорисовываем.
+            if let Some(following) = self.frames.get(&next.wrapping_add(1)).cloned() {
+                self.decoder.decode(Some(&following), true, output);
+                self.stats.recovered += 1;
+            } else {
                 self.decoder.decode(None, false, output);
                 self.stats.concealed += 1;
+                damaged = true;
+            }
+            self.waiting = 0;
+            self.next = Some(next.wrapping_add(1));
+        } else {
+            // Буфер пуст: пакет опаздывает. Дорисовываем 20 мс, но ждём именно его —
+            // номер не сдвигается, и запас вырастает ровно на опоздание.
+            if self.waiting == 0 {
+                self.spare = (self.spare + 1).min(MAX_SPARE);
+                self.calm_frames = 0;
+            }
+            self.waiting += 1;
+            if self.waiting <= CONCEAL_LIMIT {
+                self.decoder.decode(None, false, output);
+                self.stats.concealed += 1;
+                damaged = true;
             } else {
                 output.fill(0);
             }
-            if self.frames.is_empty() && self.missing_streak > 10 {
+            if self.waiting >= RESTART_AFTER {
                 // Собеседник пропал надолго — начинаем заново, когда звук вернётся.
                 self.next = None;
-                self.adapt();
-                return;
-            }
-            if !self.frames.is_empty() && self.missing_streak > 3 {
-                // Впереди уже есть звук: перепрыгиваем дыру, а не ждём её.
-                self.next = self.frames.keys().next().copied();
-                self.adapt();
-                return;
+                self.waiting = 0;
             }
         }
-        self.next = Some(next.wrapping_add(1));
-        self.adapt();
+        if !damaged && self.waiting == 0 && self.should_trim() {
+            self.trim(output);
+        }
+        self.account(damaged);
     }
 
-    /// Раз в секунду: опаздывали кадры — запас растёт, сеть ровная — сокращается.
-    fn adapt(&mut self) {
-        self.window_frames += 1;
-        if self.window_frames < 50 {
-            self.stats.depth_frames = self.depth();
-            return;
+    /// Можно ли срезать задержку: за окно запас ни разу не опускался до нужного.
+    fn should_trim(&mut self) -> bool {
+        self.trim_frames += 1;
+        if self.trim_frames < TRIM_WINDOW {
+            return false;
         }
-        if self.window_underruns >= 2 {
-            self.target = (self.target + 1).min(MAX_DEPTH);
-            self.calm_windows = 0;
+        let excess = self.trim_min_depth != usize::MAX && self.trim_min_depth > self.spare + 3;
+        self.trim_frames = 0;
+        self.trim_min_depth = usize::MAX;
+        let Some(next) = self.next else {
+            return false;
+        };
+        excess
+            && self.frames.contains_key(&next)
+            && self.frames.contains_key(&next.wrapping_add(1))
+    }
+
+    /// Срез 40 мс без щелчка. Во второй половине только что выданного кадра звук плавно
+    /// переходит в вторую половину кадра через один; оба пропускаемых кадра всё равно
+    /// декодируются, поэтому состояние декодера остаётся непрерывным, и следующий кадр
+    /// продолжает уже то, чем закончился переход.
+    fn trim(&mut self, output: &mut [i16; FRAME_SAMPLES]) {
+        let Some(next) = self.next else {
+            return;
+        };
+        let (Some(skipped), Some(following)) = (
+            self.frames.remove(&next),
+            self.frames.remove(&next.wrapping_add(1)),
+        ) else {
+            return;
+        };
+        let mut incoming = [0i16; FRAME_SAMPLES];
+        self.decoder.decode(Some(&skipped), false, &mut incoming);
+        self.decoder.decode(Some(&following), false, &mut incoming);
+        let start = FRAME_SAMPLES - CROSSFADE_SAMPLES;
+        for i in 0..CROSSFADE_SAMPLES {
+            let weight = (i + 1) as f32 / CROSSFADE_SAMPLES as f32;
+            let blended =
+                f32::from(output[start + i]) * (1.0 - weight) + f32::from(incoming[start + i]) * weight;
+            output[start + i] = blended.round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
+        }
+        self.next = Some(next.wrapping_add(2));
+        self.stats.trimmed += 2;
+    }
+
+    fn account(&mut self, damaged: bool) {
+        self.second_frames += 1;
+        if damaged {
+            self.second_damaged += 1;
         } else {
-            self.calm_windows += 1;
-            if self.calm_windows >= 5 && self.target > MIN_DEPTH {
-                self.target -= 1;
-                self.calm_windows = 0;
+            self.calm_frames += 1;
+            if self.calm_frames >= CALM_FRAMES && self.spare > MIN_SPARE {
+                self.spare -= 1;
+                self.calm_frames = 0;
             }
         }
-        // Лишний запас — лишняя задержка: выбрасываем один самый старый кадр.
-        if self.window_min_depth != usize::MAX
-            && self.window_min_depth > self.target + 2
-            && let Some(next) = self.next
-        {
-            self.frames.remove(&next);
-            self.next = Some(next.wrapping_add(1));
+        if self.second_frames >= 50 {
+            self.seconds.push_back((self.second_frames, self.second_damaged));
+            while self.seconds.len() > QUALITY_SECONDS {
+                self.seconds.pop_front();
+            }
+            self.second_frames = 0;
+            self.second_damaged = 0;
         }
-        self.window_frames = 0;
-        self.window_underruns = 0;
-        self.window_min_depth = usize::MAX;
-        self.stats.target_frames = self.target;
+        self.stats.target_frames = self.spare + 1;
         self.stats.depth_frames = self.depth();
     }
 }
 
-/// Громкость кадра 0..1 по логарифмической шкале — для анимации волны в интерфейсе.
+// Громкость кадра 0..1 по логарифмической шкале — для анимации волны в интерфейсе.
 pub fn level(pcm: &[i16]) -> f32 {
     if pcm.is_empty() {
         return 0.0;
@@ -326,6 +438,70 @@ mod tests {
         }
         assert!(buffer.stats.recovered > 20, "{:?}", buffer.stats);
         assert!(loud > 180, "звук должен идти почти без провалов: {loud} {:?}", buffer.stats);
+    }
+
+    /// Пакеты приходят пачками по три раз в 60 мс, как бывает на мобильной сети и
+    /// с аудио-HAL, отдающим микрофон крупными порциями. Потерь нет вовсе — значит, после
+    /// короткой подстройки звук должен идти без дорисовывания и без выброшенных пакетов.
+    #[test]
+    fn bursty_delivery_without_loss_sounds_clean() {
+        let mut encoder = Encoder::new().unwrap();
+        let mut buffer = JitterBuffer::new().unwrap();
+        let mut output = [0i16; FRAME_SAMPLES];
+        let mut sent = 0u32;
+        for tick in 0..1_500u32 {
+            if tick % 3 == 0 {
+                for _ in 0..3 {
+                    buffer.insert(sent, encoder.encode(&tone(sent)).unwrap());
+                    sent += 1;
+                }
+            }
+            buffer.pull(&mut output);
+        }
+        assert_eq!(buffer.stats.late, 0, "{:?}", buffer.stats);
+        assert!(buffer.recent_damage() < 0.01, "{} {:?}", buffer.recent_damage(), buffer.stats);
+        assert!(buffer.stats.concealed < 10, "{:?}", buffer.stats);
+    }
+
+    /// Пакет задержался на 100 мс: прежний буфер дорисовывал его место и выбрасывал
+    /// сам пакет. Теперь буфер ждёт: пакет проигрывается, а не теряется.
+    #[test]
+    fn a_late_packet_is_played_not_dropped() {
+        let mut encoder = Encoder::new().unwrap();
+        let mut buffer = JitterBuffer::new().unwrap();
+        let mut output = [0i16; FRAME_SAMPLES];
+        let packets: Vec<Vec<u8>> = (0..400).map(|frame| encoder.encode(&tone(frame)).unwrap()).collect();
+        for tick in 0..400u32 {
+            match tick {
+                // Кадры 200–204 застряли в сети и пришли разом вместе с 205-м.
+                200..=204 => {}
+                205 => {
+                    for frame in 200..=205 {
+                        buffer.insert(frame, packets[frame as usize].clone());
+                    }
+                }
+                _ => buffer.insert(tick, packets[tick as usize].clone()),
+            }
+            buffer.pull(&mut output);
+        }
+        assert_eq!(buffer.stats.late, 0, "{:?}", buffer.stats);
+        assert_eq!(buffer.stats.recovered, 0, "ни один кадр не потерян: {:?}", buffer.stats);
+    }
+
+    /// После обрыва связи пришла секунда накопившегося звука: буфер догоняет сразу,
+    /// а не проигрывает её с опозданием.
+    #[test]
+    fn a_backlog_is_skipped_at_once() {
+        let mut encoder = Encoder::new().unwrap();
+        let mut buffer = JitterBuffer::new().unwrap();
+        let mut output = [0i16; FRAME_SAMPLES];
+        for frame in 0..60u32 {
+            buffer.insert(frame, encoder.encode(&tone(frame)).unwrap());
+        }
+        buffer.pull(&mut output);
+        buffer.pull(&mut output);
+        assert!(buffer.stats.depth_frames <= MAX_SPARE + 1, "{:?}", buffer.stats);
+        assert!(buffer.stats.trimmed > 40, "{:?}", buffer.stats);
     }
 
     #[test]
