@@ -111,6 +111,41 @@ object NativeCore {
         }
     }
 
+    /**
+     * Звонок. Аудиопотоки отдают и забирают кадр каждые 20 мс, а экран спрашивает состояние
+     * десятки раз в секунду, поэтому всё это идёт мимо `@Synchronized`: у звонка своя
+     * блокировка внутри Rust, и ждать окончания синхронизации ради кадра голоса нельзя.
+     * Хэндл на время вызова удерживается так же, как при ожидании конверта.
+     */
+    fun callPush(pcm: ShortArray) {
+        borrow(Unit) { nativeCallPush(it, pcm, pcm.size) }
+    }
+
+    /** Кадр для динамика. `false` — звонка с медиапотоком нет, играть нечего. */
+    fun callPull(output: ShortArray): Boolean = borrow(false) { nativeCallPull(it, output, output.size) }
+
+    /** Состояние звонка в JSON; `{"active":false}` — звонка нет. */
+    fun callStatus(): String = borrow("{\"active\":false}") { nativeCallStatus(it) }
+
+    /** `mute`, `unmute`, `hangup` или `dismiss`. */
+    fun callAction(name: String): Boolean = borrow(false) { nativeCallAction(it, name) }
+
+    private inline fun <T> borrow(fallback: T, block: (Long) -> T): T {
+        val current = synchronized(lifetime) {
+            if (disposed || handle == 0L) return fallback
+            waiting += 1
+            handle
+        }
+        try {
+            return block(current)
+        } finally {
+            synchronized(lifetime) {
+                waiting -= 1
+                releaseIfIdle()
+            }
+        }
+    }
+
     private external fun nativeCreate(appDir: String, vaultKeyBase64: String): Long
     private external fun nativeInvoke(handle: Long, request: String): String
     private external fun nativeDestroy(handle: Long)
@@ -119,6 +154,10 @@ object NativeCore {
     private external fun nativeMediaRead(media: Long, offset: Long, buffer: ByteArray, length: Int): Int
     private external fun nativeMediaClose(media: Long)
     private external fun nativeWaitForEnvelopes(handle: Long, seconds: Int): Int
+    private external fun nativeCallPush(handle: Long, pcm: ShortArray, length: Int)
+    private external fun nativeCallPull(handle: Long, output: ShortArray, length: Int): Boolean
+    private external fun nativeCallStatus(handle: Long): String
+    private external fun nativeCallAction(handle: Long, name: String): Boolean
 }
 
 private object VaultKey {

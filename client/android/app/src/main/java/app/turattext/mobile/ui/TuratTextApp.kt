@@ -93,6 +93,8 @@ class AppActions(
     val dismissUpdate: () -> Unit,
     /** Отказ от предложенной версии насовсем. */
     val skipUpdate: () -> Unit,
+    /** Аудиозвонок контакту в личном диалоге. */
+    val startCall: (app.turattext.mobile.model.Contact) -> Unit,
 )
 
 private sealed interface Overlay {

@@ -42,9 +42,17 @@ services:
       TURATTEXT_V2_TRUST_FORWARDED_FOR: "true"
       TURATTEXT_BACKUP_ENABLED: "false"
       TURATTEXT_ADMIN_PASSWORD: ""
+      # Звонки: голос идёт через UDP-ретранслятор Node. Где UDP закрыт, клиенты сами
+      # переходят на WebSocket поверх TLS через Caddy (wss://домен/v2/calls/ws).
+      TURATTEXT_V2_CALL_UDP_PORT: "3479"
+      TURATTEXT_V2_CALL_PUBLIC_HOST: ${TURATTEXT_CALL_PUBLIC_HOST:-}
+      TURATTEXT_V2_CALL_MAX_ROOMS: ${TURATTEXT_V2_CALL_MAX_ROOMS:-2000}
+      TURATTEXT_V2_CALL_ROOMS_PER_HOUR: ${TURATTEXT_V2_CALL_ROOMS_PER_HOUR:-60}
     volumes:
       - node-data:/app/data
     expose: ["8080"]
+    ports:
+      - "3479:3479/udp"
     networks: [backend]
     security_opt: ["no-new-privileges:true"]
 

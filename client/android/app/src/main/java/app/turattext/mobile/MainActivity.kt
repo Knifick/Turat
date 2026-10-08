@@ -1,7 +1,9 @@
 package app.turattext.mobile
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -13,6 +15,7 @@ import android.os.Bundle
 import android.util.Base64
 import android.view.View
 import android.view.WindowInsetsController
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -28,10 +31,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.turattext.mobile.calls.CallController
+import app.turattext.mobile.calls.CallNotifications
+import app.turattext.mobile.calls.CallPhase
 import app.turattext.mobile.model.Attachment
 import app.turattext.mobile.model.CoreJson
 import app.turattext.mobile.model.MediaKind
 import app.turattext.mobile.ui.AppActions
+import app.turattext.mobile.ui.CallLayer
+import app.turattext.mobile.ui.CallUiActions
 import app.turattext.mobile.ui.Telegram
 import app.turattext.mobile.ui.TuratTextApp
 import app.turattext.mobile.ui.TuratTextTheme
@@ -42,10 +50,17 @@ class MainActivity : ComponentActivity() {
     /** Ссылка-приглашение в канал, с которой открыли приложение. */
     private val channelLink = mutableStateOf<String?>(null)
 
+    /** Ответ на звонок из уведомления: выполняется, как только экран готов спросить микрофон. */
+    private val acceptRequested = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         drawEdgeToEdge()
-        if (savedInstanceState == null) channelLink.value = channelLinkOf(intent)
+        CallController.attach(this)
+        if (savedInstanceState == null) {
+            channelLink.value = channelLinkOf(intent)
+            acceptRequested.value = intent?.action == CallNotifications.ActionAccept
+        }
         setContent {
             val model: MainViewModel = viewModel()
             val theme by model.theme.collectAsStateWithLifecycle()
@@ -70,6 +85,46 @@ class MainActivity : ComponentActivity() {
                 var pendingAttachmentSave by remember { mutableStateOf<String?>(null) }
 
                 var pendingSendChoice by remember { mutableStateOf<SendChoice?>(null) }
+
+                // Звонку нужен микрофон; разрешение на уведомления просим заодно — без него
+                // входящий вызов не покажется поверх других приложений.
+                var pendingCall by remember { mutableStateOf<(() -> Unit)?>(null) }
+                val callPermissions = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions(),
+                ) { granted ->
+                    val action = pendingCall
+                    pendingCall = null
+                    if (granted[Manifest.permission.RECORD_AUDIO] == true) {
+                        action?.invoke()
+                    } else {
+                        model.notify("Для звонков нужен доступ к микрофону")
+                    }
+                }
+                val withMicrophone: (() -> Unit) -> Unit = { action ->
+                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        action()
+                    } else {
+                        pendingCall = action
+                        callPermissions.launch(callPermissionList())
+                    }
+                }
+                val accepting by acceptRequested
+                LaunchedEffect(accepting) {
+                    if (!accepting) return@LaunchedEffect
+                    acceptRequested.value = false
+                    if (CallController.state.value?.phase == CallPhase.Incoming) withMicrophone(model::acceptCall)
+                }
+                LaunchedEffect(Unit) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        val preferences = getSharedPreferences("turattext-ui", Context.MODE_PRIVATE)
+                        if (!preferences.getBoolean(NotificationsAskedKey, false)) {
+                            preferences.edit().putBoolean(NotificationsAskedKey, true).apply()
+                            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+                        }
+                    }
+                }
                 val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
                     val contact = model.state.value.selectedContactId ?: return@rememberLauncherForActivityResult
                     uri ?: return@rememberLauncherForActivityResult
@@ -220,6 +275,7 @@ class MainActivity : ComponentActivity() {
                         cancelUpdate = model::cancelUpdate,
                         dismissUpdate = model::dismissUpdate,
                         skipUpdate = model::skipUpdate,
+                        startCall = { contact -> withMicrophone { model.startCall(contact) } },
                     )
                 }
 
@@ -235,6 +291,24 @@ class MainActivity : ComponentActivity() {
                     onFontChange = model::setFont,
                     actions = actions,
                 )
+
+                val call by CallController.state.collectAsStateWithLifecycle()
+                val callFailure by CallController.failure.collectAsStateWithLifecycle()
+                val speaker by CallController.speaker.collectAsStateWithLifecycle()
+                val minimized by CallController.minimized.collectAsStateWithLifecycle()
+                val callActions = remember(model) {
+                    CallUiActions(
+                        accept = { withMicrophone(model::acceptCall) },
+                        hangUp = CallController::hangUp,
+                        toggleMute = CallController::toggleMute,
+                        toggleSpeaker = CallController::toggleSpeaker,
+                        setMinimized = CallController::setMinimized,
+                    )
+                }
+                val live = call?.live == true
+                val incoming = call?.phase == CallPhase.Incoming
+                LaunchedEffect(live, incoming) { showOverLockScreen(live, incoming) }
+                CallLayer(call, callFailure, speaker, minimized, callActions)
 
                 pendingSendChoice?.let { choice ->
                     SendChoiceDialog(
@@ -263,6 +337,47 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         channelLinkOf(intent)?.let { channelLink.value = it }
+        when (intent.action) {
+            CallNotifications.ActionAccept -> acceptRequested.value = true
+            CallNotifications.ActionShow -> CallController.setMinimized(false)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        CallController.setUiVisible(true)
+    }
+
+    override fun onStop() {
+        CallController.setUiVisible(false)
+        super.onStop()
+    }
+
+    private fun callPermissionList(): Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            arrayOf(Manifest.permission.RECORD_AUDIO)
+        }
+
+    /**
+     * Входящий вызов показывается поверх экрана блокировки и будит экран; пока идёт разговор,
+     * экран сам не гаснет — гасит его только датчик приближения у уха.
+     */
+    private fun showOverLockScreen(live: Boolean, incoming: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(live)
+            setTurnScreenOn(incoming)
+        } else {
+            @Suppress("DEPRECATION")
+            val flags = WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            if (live) window.addFlags(flags) else window.clearFlags(flags)
+        }
+        if (live) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     private fun channelLinkOf(intent: Intent?): String? =
@@ -413,6 +528,9 @@ internal fun encodeThumbnail(source: Bitmap): String? = runCatching {
 
 /** Совпадает с пределом ядра на фото группы в base64. */
 private const val GroupAvatarLimit = 32_000
+
+/** Разрешение на уведомления просим один раз: дальше это решение пользователя. */
+private const val NotificationsAskedKey = "notifications-asked"
 
 /** Аватар уменьшается и кодируется в JPEG: запись профиля должна быть компактной. */
 private fun encodeAvatar(context: Context, uri: Uri, edge: Int = 256, quality: Int = 80): String? = runCatching {

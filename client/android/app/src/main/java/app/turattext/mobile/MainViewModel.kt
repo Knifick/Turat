@@ -4,10 +4,12 @@ import android.app.Application
 import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.turattext.mobile.calls.CallController
 import app.turattext.mobile.core.NativeCore
 import app.turattext.mobile.describeMedia
 import app.turattext.mobile.media.Compression
 import app.turattext.mobile.model.AppSnapshot
+import app.turattext.mobile.model.Contact
 import app.turattext.mobile.model.Attachment
 import app.turattext.mobile.model.MediaKind
 import app.turattext.mobile.model.CoreJson
@@ -63,6 +65,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         NativeCore.initialize(application)
+        CallController.attach(application)
+        // Конец звонка ядро досылает собеседнику и пишет в историю — через ту же очередь,
+        // чтобы запись о звонке сразу появилась в ленте.
+        CallController.runner = { command ->
+            viewModelScope.launch { runCommand(command, background = true) }
+        }
         execute(CoreJson.command("snapshot"))
         startBackgroundSync()
         startUpdateChecks(application)
@@ -479,8 +487,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun edit(eventId: String, text: String) = execute(CoreJson.command("edit_message", "event_id" to eventId, "text" to text))
     fun sync() = execute(CoreJson.command("sync"))
 
+    // --- звонки ----------------------------------------------------------------
+
+    /** Экран звонка открывается сразу, а комнату на Node ядро создаёт в фоне. */
+    fun startCall(contact: Contact) {
+        if (CallController.state.value?.live == true) {
+            notify("Уже идёт звонок")
+            return
+        }
+        CallController.dial(contact.userId, contact.displayName, contact.avatarBase64)
+        viewModelScope.launch {
+            val result = applySnapshot(invoke(CoreJson.command("start_call", "user_id" to contact.userId)), background = false)
+            if (result.ok) {
+                CallController.dialStarted()
+            } else {
+                CallController.dialFailed(result.error ?: "Не удалось позвонить")
+            }
+        }
+    }
+
+    fun acceptCall() {
+        CallController.answering()
+        viewModelScope.launch {
+            val result = applySnapshot(invoke(CoreJson.command("accept_call")), background = false)
+            if (!result.ok) {
+                notify(result.error ?: "Не удалось ответить")
+                CallController.hangUp()
+            }
+        }
+    }
+
     override fun onCleared() {
-        NativeCore.close()
+        CallController.runner = null
+        // Идущий звонок переживает закрытие окна: его держит сервис, а ядро нужно звуку.
+        if (CallController.state.value?.live != true) NativeCore.close()
         super.onCleared()
     }
 

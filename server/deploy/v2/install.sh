@@ -47,6 +47,8 @@ for _ in $(seq 1 90); do
     echo "TuratText v2 Node is ready: https://$domain"
     curl -fsS "https://$domain/v2/node-descriptor"
     printf '\n'
+    echo "Calls: open UDP port 3479 in the firewall (e.g. ufw allow 3479/udp)."
+    echo "Without it calls still work, but over TLS on 443 with higher latency."
     exit 0
   fi
   sleep 2

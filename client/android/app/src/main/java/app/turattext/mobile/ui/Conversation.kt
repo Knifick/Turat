@@ -270,6 +270,9 @@ fun ConversationPane(
                         onDeleteChat = {
                             if (isGroup || isChannel) confirmGroupDelete = true else actions.deleteContact(contact.userId)
                         },
+                        onCall = if (isGroup || isChannel || contact.pending) null else {
+                            { actions.startCall(contact) }
+                        },
                     )
                 } else {
                     SelectionBar(
@@ -553,6 +556,8 @@ private fun ConversationHeader(
     onClearHistory: () -> Unit,
     onMute: () -> Unit,
     onDeleteChat: () -> Unit,
+    /** Аудиозвонок: только принятому контакту в личном диалоге. */
+    onCall: (() -> Unit)? = null,
 ) {
     val colors = Telegram.colors
     Row(
@@ -603,6 +608,7 @@ private fun ConversationHeader(
                 )
             }
         }
+        if (onCall != null) CallIconButton(enabled = true, onClick = onCall)
         Box {
             IconButton({ onMenu(true) }) {
                 Icon(painterResource(R.drawable.ic_more), "Ещё", Modifier.size(20.dp), colors.text)
