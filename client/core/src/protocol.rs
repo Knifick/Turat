@@ -197,6 +197,48 @@ pub const KIND_CHANNEL_VIEWS: &str = "channel.views";
 /// Автор рассылает счётчики своих постов и число подписчиков.
 pub const KIND_CHANNEL_STATS: &str = "channel.stats";
 
+/// Голосовой звонок: приглашение с комнатой ретранслятора и одноразовым ключом звонящего.
+pub const KIND_CALL_OFFER: &str = "call.offer";
+/// Устройство собеседника приняло приглашение и звонит.
+pub const KIND_CALL_RINGING: &str = "call.ringing";
+/// Собеседник ответил: его одноразовый ключ.
+pub const KIND_CALL_ANSWER: &str = "call.answer";
+/// Звонок завершён, отклонён, отменён или собеседник занят.
+pub const KIND_CALL_END: &str = "call.end";
+
+pub fn is_call_kind(kind: &str) -> bool {
+    kind.starts_with("call.")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallOfferPayload {
+    pub version: i32,
+    pub call_id: String,
+    /// Место принимающего в комнате ретранслятора на Node звонящего.
+    pub relay: crate::calls::transport::RelayTicket,
+    /// Одноразовый X25519-ключ звонящего, base64.
+    pub ephemeral_key: String,
+    pub codec: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallAnswerPayload {
+    pub version: i32,
+    pub call_id: String,
+    pub ephemeral_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallSignalPayload {
+    pub version: i32,
+    pub call_id: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// Событие относится к каналу. Префикс нарочно не `ttc1-`: так начинается ConversationID
 /// личного диалога, и событие собеседника приняли бы за событие канала.
 pub fn is_channel_id(value: &str) -> bool {

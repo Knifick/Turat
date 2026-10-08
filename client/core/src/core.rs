@@ -14,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
 
+mod calls;
 mod channels;
 mod delivery;
 mod groups;
@@ -169,6 +170,8 @@ pub struct AppCore {
     watch: Arc<Mutex<Option<MailboxWatch>>>,
     /// Открытая ветка комментариев поста выбранного канала.
     selected_thread: Option<String>,
+    /// Текущий звонок. Свой замок: аудиопотоки и интерфейс читают его, не дожидаясь ядра.
+    pub(crate) call_slot: crate::calls::CallSlot,
 }
 
 impl AppCore {
@@ -191,6 +194,7 @@ impl AppCore {
             media_jobs: HashMap::new(),
             watch: Arc::new(Mutex::new(watch)),
             selected_thread: None,
+            call_slot: Default::default(),
         })
     }
 
@@ -246,6 +250,8 @@ impl AppCore {
     }
 
     fn execute(&mut self, command: Command) -> Result<Option<serde_json::Value>, CoreError> {
+        // Звонок мог закончиться, пока ядро было занято: сначала доделываем его сигналы.
+        self.settle_calls();
         match command {
             Command::Snapshot => {}
             Command::SelectContact { user_id } => {
@@ -1026,6 +1032,12 @@ impl AppCore {
                 text,
                 reply_to_event_id,
             } => self.send_comment(&post_event_id, &text, reply_to_event_id)?,
+            Command::StartCall { user_id } => {
+                let call_id = self.start_call(&user_id)?;
+                return Ok(Some(json!({ "callId": call_id })));
+            }
+            Command::AcceptCall => self.accept_call()?,
+            Command::SettleCalls => {}
         }
         Ok(None)
     }
@@ -1558,6 +1570,7 @@ impl AppCore {
         let download_failure = self.settle_downloads();
         self.start_pending_downloads();
         let received = self.fetch_inbox(&descriptor)?;
+        self.settle_calls();
         if let Err(error) = self.broadcast_channel_stats() {
             self.status = format!("Счётчики канала не разосланы: {error}");
         }

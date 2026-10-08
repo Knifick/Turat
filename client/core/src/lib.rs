@@ -1,4 +1,5 @@
 mod blobs;
+mod calls;
 mod core;
 mod identity;
 mod mailbox;
@@ -46,6 +47,22 @@ pub mod testing {
         pub fn call(&mut self, command: &serde_json::Value) -> serde_json::Value {
             serde_json::from_str(&self.core.invoke(&command.to_string()))
                 .expect("ядро отвечает корректным JSON")
+        }
+
+        pub fn call_status(&self) -> serde_json::Value {
+            serde_json::from_str(&crate::calls::status_json(&self.core.call_slot)).expect("JSON звонка")
+        }
+
+        pub fn call_push(&self, pcm: &[i16]) {
+            crate::calls::push(&self.core.call_slot, pcm);
+        }
+
+        pub fn call_pull(&self, output: &mut [i16]) -> bool {
+            crate::calls::pull(&self.core.call_slot, output)
+        }
+
+        pub fn call_action(&self, name: &str) -> bool {
+            crate::calls::action(&self.core.call_slot, name)
         }
     }
 }
@@ -96,12 +113,15 @@ pub struct CoreHandle {
     /// ждать конца окна, чтобы отправить сообщение.
     watch: Arc<Mutex<Option<MailboxWatch>>>,
     watcher: Option<MailboxWatcher>,
+    /// Звонок: интерфейс и аудиопотоки обращаются к нему мимо замка ядра.
+    calls: crate::calls::CallSlot,
 }
 
 impl CoreHandle {
     fn new(core: AppCore, vault_key: [u8; 32]) -> Self {
         Self {
             watch: core.watch_handle(),
+            calls: core.call_slot.clone(),
             core: Mutex::new(core),
             vault_key,
             watcher: MailboxWatcher::new().ok(),
@@ -266,6 +286,48 @@ pub unsafe extern "C" fn turattext_media_close(handle: *mut MediaHandle) {
     }
 }
 
+/// Кадр микрофона для текущего звонка: 960 отсчётов 16 бит, 48 кГц, моно. Замок ядра не
+/// нужен — аудиопоток не ждёт синхронизацию переписки.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turattext_call_push(handle: *mut CoreHandle, pcm: *const i16, length: usize) {
+    if handle.is_null() || pcm.is_null() {
+        return;
+    }
+    crate::calls::push(&unsafe { &*handle }.calls, unsafe { std::slice::from_raw_parts(pcm, length) });
+}
+
+/// Кадр для динамика. 1 — звонок идёт, 0 — звонка нет (в буфере тишина).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turattext_call_pull(handle: *mut CoreHandle, output: *mut i16, length: usize) -> i32 {
+    if handle.is_null() || output.is_null() {
+        return 0;
+    }
+    i32::from(crate::calls::pull(&unsafe { &*handle }.calls, unsafe { std::slice::from_raw_parts_mut(output, length) }))
+}
+
+/// Состояние звонка в JSON. Освобождается через `turattext_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turattext_call_status(handle: *mut CoreHandle) -> *mut c_char {
+    if handle.is_null() {
+        return json_string("Rust core не запущен");
+    }
+    CString::new(crate::calls::status_json(&unsafe { &*handle }.calls))
+        .map(CString::into_raw)
+        .unwrap_or_else(|_| json_string("Ответ содержит NUL"))
+}
+
+/// Действие без ядра: `mute`, `unmute`, `hangup`, `dismiss`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn turattext_call_action(handle: *mut CoreHandle, name: *const c_char) -> i32 {
+    if handle.is_null() || name.is_null() {
+        return 0;
+    }
+    match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(value) => i32::from(crate::calls::action(&unsafe { &*handle }.calls, value)),
+        Err(_) => 0,
+    }
+}
+
 fn json_string(error: &str) -> *mut c_char {
     let json = serde_json::json!({"ok":false,"error":error}).to_string();
     CString::new(json).expect("static JSON").into_raw()
@@ -275,8 +337,8 @@ fn json_string(error: &str) -> *mut c_char {
 mod android {
     use jni::{
         JNIEnv,
-        objects::{JByteArray, JClass, JString},
-        sys::{jint, jlong, jstring},
+        objects::{JByteArray, JClass, JShortArray, JString},
+        sys::{jboolean, jint, jlong, jstring},
     };
 
     use super::*;
@@ -427,6 +489,77 @@ mod android {
         if media != 0 {
             drop(unsafe { Box::from_raw(media as *mut MediaHandle) });
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_turattext_mobile_core_NativeCore_nativeCallPush(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        pcm: JShortArray,
+        length: jint,
+    ) {
+        if handle == 0 {
+            return;
+        }
+        let calls = &unsafe { &*(handle as *mut CoreHandle) }.calls;
+        let length = length.clamp(0, 4096) as usize;
+        let mut frame = vec![0i16; length];
+        if env.get_short_array_region(&pcm, 0, &mut frame).is_ok() {
+            crate::calls::push(calls, &frame);
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_turattext_mobile_core_NativeCore_nativeCallPull(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        output: JShortArray,
+        length: jint,
+    ) -> jboolean {
+        if handle == 0 {
+            return 0;
+        }
+        let calls = &unsafe { &*(handle as *mut CoreHandle) }.calls;
+        let length = length.clamp(0, 4096) as usize;
+        let mut frame = vec![0i16; length];
+        let active = crate::calls::pull(calls, &mut frame);
+        let _ = env.set_short_array_region(&output, 0, &frame);
+        u8::from(active)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_turattext_mobile_core_NativeCore_nativeCallStatus(
+        env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+    ) -> jstring {
+        let status = if handle == 0 {
+            "{\"active\":false}".to_owned()
+        } else {
+            crate::calls::status_json(&unsafe { &*(handle as *mut CoreHandle) }.calls)
+        };
+        env.new_string(status)
+            .map(|value| value.into_raw())
+            .unwrap_or(std::ptr::null_mut())
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_app_turattext_mobile_core_NativeCore_nativeCallAction(
+        mut env: JNIEnv,
+        _class: JClass,
+        handle: jlong,
+        name: JString,
+    ) -> jboolean {
+        if handle == 0 {
+            return 0;
+        }
+        let name: String = match env.get_string(&name) {
+            Ok(value) => value.into(),
+            Err(_) => return 0,
+        };
+        u8::from(crate::calls::action(&unsafe { &*(handle as *mut CoreHandle) }.calls, &name))
     }
 
     #[unsafe(no_mangle)]

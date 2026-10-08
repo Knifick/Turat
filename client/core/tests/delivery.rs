@@ -441,3 +441,197 @@ fn a_channel_reaches_subscribers_who_are_strangers() {
     let carol_view = call_ok(&mut carol, json!({"command": "select_contact", "user_id": channel_id}));
     assert_eq!(carol_view["snapshot"]["channel"]["removed"], true, "{carol_view}");
 }
+
+/// Тон 20 мс: у каждого собеседника своя частота, чтобы не спутать, чей звук пришёл.
+fn tone(frame: usize, frequency: f32) -> Vec<i16> {
+    (0..960)
+        .map(|index| {
+            let t = (frame * 960 + index) as f32 / 48_000.0;
+            ((t * frequency * std::f32::consts::TAU).sin() * 9_000.0) as i16
+        })
+        .collect()
+}
+
+/// Частота, которой больше всего в кадре: грубый, но надёжный признак «чей это голос».
+fn dominant(frame: &[i16], candidates: &[f32]) -> f32 {
+    let mut best = (0.0, 0.0f32);
+    for &frequency in candidates {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (index, &value) in frame.iter().enumerate() {
+            let phase = index as f64 * frequency as f64 * std::f64::consts::TAU / 48_000.0;
+            re += value as f64 * phase.cos();
+            im += value as f64 * phase.sin();
+        }
+        let power = re * re + im * im;
+        if power > best.0 {
+            best = (power, frequency);
+        }
+    }
+    best.1
+}
+
+/// Разговор длиной `seconds`: каждые 20 мс оба отдают свой тон и забирают звук собеседника.
+/// Возвращает, сколько кадров каждый услышал с частотой собеседника.
+fn talk(alice: &Client, bob: &Client, seconds: usize) -> (usize, usize) {
+    let mut heard = (0, 0);
+    let started = std::time::Instant::now();
+    let mut output = [0i16; 960];
+    for frame in 0..seconds * 50 {
+        alice.core.call_push(&tone(frame, 440.0));
+        bob.core.call_push(&tone(frame, 1_000.0));
+        alice.core.call_pull(&mut output);
+        if dominant(&output, &[440.0, 1_000.0]) == 1_000.0 && output.iter().any(|v| v.abs() > 2_000) {
+            heard.0 += 1;
+        }
+        bob.core.call_pull(&mut output);
+        if dominant(&output, &[440.0, 1_000.0]) == 440.0 && output.iter().any(|v| v.abs() > 2_000) {
+            heard.1 += 1;
+        }
+        let due = std::time::Duration::from_millis(20 * (frame as u64 + 1));
+        if let Some(wait) = due.checked_sub(started.elapsed()) {
+            std::thread::sleep(wait);
+        }
+    }
+    heard
+}
+
+fn wait_phase(client: &mut Client, phase: &str) -> Value {
+    for _ in 0..100 {
+        let status = client.core.call_status();
+        if status["phase"] == phase {
+            return status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        client.sync();
+    }
+    panic!("звонок не дошёл до «{phase}»: {}", client.core.call_status());
+}
+
+/// Звонок между контактами через ретранслятор настоящего Node: приглашение и ответ идут
+/// сквозным шифрованием, голос — зашифрованными пакетами через ретранслятор.
+#[test]
+#[ignore = "нужен запущенный Node: TURAT_TEST_NODE"]
+fn a_voice_call_connects_and_carries_audio_both_ways() {
+    let Some(node) = node_url() else {
+        panic!("Задайте TURAT_TEST_NODE");
+    };
+    let mut alice = Client::open("Алиса", &node);
+    let mut bob = Client::open("Боб", &node);
+    assert_eq!(alice.sync()["ok"], true);
+    assert_eq!(bob.sync()["ok"], true);
+    let (alice_id, bob_id) = (alice.user_id.clone(), bob.user_id.clone());
+    alice.add(&bob_id);
+    assert_eq!(alice.send(&bob_id, "привет, позвоню?")["ok"], true);
+    assert_eq!(bob.sync()["ok"], true);
+
+    // Непринятому контакту позвонить нельзя, а его звонок не доходит.
+    let refused = bob.core.call(&json!({"command": "start_call", "user_id": alice_id}));
+    assert_eq!(refused["ok"], false, "{refused}");
+    call_ok(&mut bob, json!({"command": "accept_contact", "user_id": alice_id}));
+    assert_eq!(bob.send(&alice_id, "давай")["ok"], true);
+    assert_eq!(alice.sync()["ok"], true);
+
+    let started = call_ok(&mut alice, json!({"command": "start_call", "user_id": bob_id}));
+    assert!(started["value"]["callId"].as_str().unwrap().starts_with("call1-"));
+    assert_eq!(alice.core.call_status()["phase"], "calling");
+
+    let incoming = wait_phase(&mut bob, "incoming");
+    assert_eq!(incoming["peerName"], "Алиса");
+    wait_phase(&mut alice, "ringing");
+
+    call_ok(&mut bob, json!({"command": "accept_call"}));
+    // Пока Алиса не узнала об ответе, Боб уже в комнате ретранслятора.
+    wait_phase(&mut alice, "connecting");
+    // Первые кадры доказывают, что связь есть: обе стороны переходят в «active».
+    let warmup = talk(&alice, &bob, 1);
+    let alice_status = wait_phase(&mut alice, "active");
+    let bob_status = wait_phase(&mut bob, "active");
+    assert_eq!(alice_status["safetyCode"], bob_status["safetyCode"], "код проверки совпадает");
+    assert_eq!(alice_status["safetyCode"].as_array().unwrap().len(), 4);
+    assert_eq!(alice_status["transport"], "udp");
+
+    let (alice_heard, bob_heard) = talk(&alice, &bob, 4);
+    eprintln!("прогрев {warmup:?}, разговор: Алиса слышала {alice_heard}/200, Боб {bob_heard}/200");
+    assert!(alice_heard > 170 && bob_heard > 170, "звук идёт в обе стороны: {alice_heard} {bob_heard}");
+    let status = alice.core.call_status();
+    assert!(status["durationMs"].as_i64().unwrap() > 3_000, "{status}");
+    assert!(status["rttMs"].as_u64().unwrap() < 500, "{status}");
+
+    // Сброс у Алисы: Боб узнаёт мгновенно, по медиаканалу.
+    assert!(alice.core.call_action("hangup"));
+    let mut ended = false;
+    for _ in 0..30 {
+        if bob.core.call_status()["phase"] == "ended" {
+            ended = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(ended, "Боб не узнал о завершении: {}", bob.core.call_status());
+    assert_eq!(bob.core.call_status()["endReason"], "hangup_remote");
+    call_ok(&mut alice, json!({"command": "settle_calls"}));
+    call_ok(&mut bob, json!({"command": "settle_calls"}));
+    let history = alice.conversation(&bob_id);
+    let record = history.iter().rev().find(|m| m["service"] == true).expect("звонок в истории");
+    assert!(record["text"].as_str().unwrap().starts_with("📞 Исходящий звонок · 0:0"), "{record}");
+    let history = bob.conversation(&alice_id);
+    let record = history.iter().rev().find(|m| m["service"] == true).expect("звонок в истории");
+    assert!(record["text"].as_str().unwrap().starts_with("📞 Входящий звонок · 0:0"), "{record}");
+
+    // Отклонённый звонок.
+    call_ok(&mut alice, json!({"command": "start_call", "user_id": bob_id}));
+    wait_phase(&mut bob, "incoming");
+    assert!(bob.core.call_action("hangup"));
+    call_ok(&mut bob, json!({"command": "settle_calls"}));
+    let status = wait_phase(&mut alice, "ended");
+    assert_eq!(status["endReason"], "declined_remote");
+}
+
+fn iptables(arguments: &[&str]) {
+    let status = std::process::Command::new("iptables").args(arguments).status().expect("iptables");
+    assert!(status.success(), "iptables {arguments:?}");
+}
+
+/// UDP режут посреди разговора: звонок сам уходит в WebSocket поверх TLS и продолжается.
+/// Нужны права на iptables: `TURAT_TEST_BLOCK_UDP=<порт ретранслятора>`.
+#[test]
+#[ignore = "нужен Node и iptables: TURAT_TEST_NODE, TURAT_TEST_BLOCK_UDP"]
+fn a_call_survives_udp_being_cut_mid_conversation() {
+    let (Some(node), Ok(port)) = (node_url(), std::env::var("TURAT_TEST_BLOCK_UDP")) else {
+        panic!("Задайте TURAT_TEST_NODE и TURAT_TEST_BLOCK_UDP");
+    };
+    let mut alice = Client::open("Алиса", &node);
+    let mut bob = Client::open("Боб", &node);
+    assert_eq!(alice.sync()["ok"], true);
+    assert_eq!(bob.sync()["ok"], true);
+    let (alice_id, bob_id) = (alice.user_id.clone(), bob.user_id.clone());
+    alice.add(&bob_id);
+    alice.send(&bob_id, "привет");
+    bob.sync();
+    call_ok(&mut bob, json!({"command": "accept_contact", "user_id": alice_id}));
+    bob.send(&alice_id, "привет");
+    alice.sync();
+
+    call_ok(&mut alice, json!({"command": "start_call", "user_id": bob_id}));
+    wait_phase(&mut bob, "incoming");
+    call_ok(&mut bob, json!({"command": "accept_call"}));
+    wait_phase(&mut alice, "connecting");
+    talk(&alice, &bob, 1);
+    assert_eq!(wait_phase(&mut alice, "active")["transport"], "udp");
+
+    // INPUT, а не OUTPUT: пакеты молча пропадают по дороге, как при настоящей блокировке.
+    iptables(&["-I", "INPUT", "-p", "udp", "--dport", &port, "-j", "DROP"]);
+    let cut = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let during = talk(&alice, &bob, 10);
+        let after = talk(&alice, &bob, 4);
+        (during, after, alice.core.call_status(), bob.core.call_status())
+    }));
+    iptables(&["-D", "INPUT", "-p", "udp", "--dport", &port, "-j", "DROP"]);
+    let (during, after, alice_status, bob_status) = cut.expect("разговор при обрезанном UDP");
+    eprintln!("UDP обрезан: за 10 с услышано {during:?} из 500, следующие 4 с: {after:?} из 200");
+    assert_eq!(alice_status["transport"], "tls", "{alice_status}");
+    assert_eq!(bob_status["transport"], "tls", "{bob_status}");
+    assert_eq!(alice_status["phase"], "active");
+    assert!(after.0 > 180 && after.1 > 180, "после переключения звук идёт: {after:?}");
+    alice.core.call_action("hangup");
+}

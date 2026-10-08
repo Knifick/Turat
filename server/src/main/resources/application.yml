@@ -67,3 +67,7 @@ turattext:
     contact-max-envelopes: ${TURATTEXT_V2_CONTACT_MAX_ENVELOPES:64}
     blob-max-bytes: ${TURATTEXT_V2_BLOB_MAX_BYTES:536870912}
     blob-max-chunk-bytes: ${TURATTEXT_V2_BLOB_MAX_CHUNK_BYTES:1048576}
+    call-udp-port: ${TURATTEXT_V2_CALL_UDP_PORT:3479}
+    call-public-host: ${TURATTEXT_V2_CALL_PUBLIC_HOST:}
+    call-max-rooms: ${TURATTEXT_V2_CALL_MAX_ROOMS:2000}
+    call-rooms-per-hour: ${TURATTEXT_V2_CALL_ROOMS_PER_HOUR:60}

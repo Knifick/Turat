@@ -608,6 +608,10 @@ impl AppCore {
             // Пока диалог не принят, канал несёт только запрос на общение.
             return Ok(false);
         }
+        // Звонок: только от принятого контакта (проверено выше) и мимо истории сообщений.
+        if crate::protocol::is_call_kind(&event.kind) {
+            return self.apply_call_event(event);
+        }
         if existing.is_none() {
             self.create_pending_contact(node, &event.sender_user_id)?;
         }

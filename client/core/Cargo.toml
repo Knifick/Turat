@@ -30,6 +30,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
 thiserror = "2.0.16"
+# Звонки: Opus — эталонный libopus, переведённый на Rust (без C-тулчейна под Android и Windows),
+# WebSocket-фолбэк поверх того же rustls/ring, что и у reqwest.
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+unsafe-libopus = "0.2.0"
+webpki-roots = "1"
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 zeroize = "1.8.1"

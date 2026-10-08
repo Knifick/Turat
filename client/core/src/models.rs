@@ -972,6 +972,15 @@ pub enum Command {
         #[serde(default)]
         reply_to_event_id: Option<String>,
     },
+    /// Голосовой звонок принятому контакту. Возвращает `callId`; дальше состояние звонка
+    /// читается через `turattext_call_status` без замка ядра.
+    StartCall {
+        user_id: String,
+    },
+    AcceptCall,
+    /// Сброс, отказ и микрофон делаются без ядра (`turattext_call_action`); эта команда
+    /// отправляет собеседнику оставшиеся сигналы и пишет звонок в историю сразу.
+    SettleCalls,
 }
 
 #[derive(Debug, Serialize)]

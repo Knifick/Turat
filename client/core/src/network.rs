@@ -21,6 +21,19 @@ use crate::{
     routing::SignedRoutingDescriptor,
 };
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRoomWire {
+    pub room_id: String,
+    pub caller_token: String,
+    pub callee_token: String,
+    #[serde(default)]
+    pub udp_host: Option<String>,
+    #[serde(default)]
+    pub udp_port: u16,
+    pub web_socket_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MailboxRegistrationWire {
@@ -434,6 +447,19 @@ impl Network {
             created_at_unix_milliseconds: crate::mailbox::parse_rfc3339(&registration.created_at)?,
             expires_at_unix_milliseconds: crate::mailbox::parse_rfc3339(&registration.expires_at)?,
         })
+    }
+
+    /// Комната ретранслятора звонков на Node. Сам Node звонок не слышит: он лишь
+    /// пересылает зашифрованные клиентами пакеты между двумя местами комнаты.
+    pub fn create_call_room(&self, node: &NodeDescriptor) -> Result<CallRoomWire, CoreError> {
+        let uri = format!("{}/v2/calls/rooms", node.base_url.trim_end_matches('/'));
+        let response = self.http.post(uri).json(&json!({})).send()?;
+        if response.status().as_u16() == 404 {
+            return Err(CoreError::InvalidInput(
+                "Node ещё не умеет звонки: его нужно обновить".to_owned(),
+            ));
+        }
+        Ok(checked(response)?.json()?)
     }
 
     pub fn put_envelope(
