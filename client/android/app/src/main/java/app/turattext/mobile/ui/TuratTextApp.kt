@@ -35,6 +35,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
@@ -84,8 +85,6 @@ class AppActions(
     val saveAttachment: (Message) -> Unit,
     /** Прерывает начатую передачу вложения по идентификатору задачи. */
     val cancelTransfer: (String) -> Unit,
-    val export: (String, String, String) -> Unit,
-    val importFile: (String, String, Array<String>) -> Unit,
     val checkUpdates: () -> Unit,
     val installUpdate: () -> Unit,
     val cancelUpdate: () -> Unit,
@@ -130,20 +129,29 @@ fun TuratTextApp(
     actions: AppActions,
 ) {
     val colors = Telegram.colors
-    if (state.onboardingRequired) {
-        OnboardingScreen(state.profile) { username, name ->
-            actions.command(
-                CoreJson.command(
-                    "save_profile",
-                    "username" to username,
-                    "display_name" to name,
-                    "about" to "",
-                    "avatar_base64" to null,
-                ),
-                null,
-            )
+    // Аккаунт: без входа приложение не открывается; переписке без аккаунта предлагаем
+    // защиту паролем при каждом запуске, пока пользователь не согласится.
+    var accountPostponed by rememberSaveable { mutableStateOf(false) }
+    var conflictPostponed by rememberSaveable { mutableStateOf(false) }
+    val account = state.account
+    val runAccount: AccountRunner = { command, after -> actions.command(command) { ok -> after(ok) } }
+    when {
+        account.recoveryKey != null -> {
+            RecoveryKeyScreen(account.recoveryKey, busy, runAccount)
+            return
         }
-        return
+        account.state == "none" -> {
+            AccountScreen(state, busy, runAccount, onLater = null)
+            return
+        }
+        account.state == "legacy" && !accountPostponed -> {
+            AccountScreen(state, busy, runAccount) { accountPostponed = true }
+            return
+        }
+        account.usernameConflict && !conflictPostponed -> {
+            UsernameConflictScreen(state, busy, runAccount) { conflictPostponed = true }
+            return
+        }
     }
 
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -504,10 +512,15 @@ fun TuratTextApp(
         OverlayScreen(overlay is Overlay.Settings) {
             SettingsScreen(
                 state = state,
+                busy = busy,
                 update = update,
                 theme = theme,
                 font = font,
                 actions = actions,
+                onSetUpAccount = {
+                    accountPostponed = false
+                    overlay = Overlay.None
+                },
                 onThemeChange = onThemeChange,
                 onFontChange = onFontChange,
                 onOpenUpdate = { overlay = Overlay.Update },

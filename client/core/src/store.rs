@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    cell::Cell,
+    path::{Path, PathBuf},
+};
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use rand_core::{OsRng, RngCore};
@@ -74,7 +77,29 @@ pub struct Store {
     connection: Connection,
     key: [u8; 32],
     pub app_dir: PathBuf,
+    /// Пока больше нуля, изменения не попадают в журнал синхронизации: так применяются
+    /// записи, пришедшие с других устройств аккаунта, — иначе они ушли бы обратно эхом.
+    quiet: Cell<u32>,
 }
+
+/// Строка журнала синхронизации: что изменилось, под каким номером и с какой отметкой времени.
+#[derive(Debug, Clone)]
+pub struct SyncChange {
+    pub kind: String,
+    pub key: String,
+    pub seq: i64,
+    pub stamp: i64,
+}
+
+pub const SYNC_PROFILE: &str = "profile";
+pub const SYNC_CONTACT: &str = "contact";
+pub const SYNC_MESSAGE: &str = "message";
+pub const SYNC_GROUP: &str = "group";
+pub const SYNC_CHANNEL: &str = "channel";
+pub const SYNC_CHANNEL_POST: &str = "channel_post";
+pub const SYNC_CHANNEL_SUBSCRIBER: &str = "channel_subscriber";
+pub const SYNC_GRANT: &str = "grant";
+pub const SYNC_DEVICE_NAME: &str = "device_name";
 
 impl Store {
     pub fn open(app_dir: &Path, key: [u8; 32]) -> Result<Self, CoreError> {
@@ -203,13 +228,178 @@ impl Store {
              CREATE TABLE IF NOT EXISTS channel_post_stats(
                event_id TEXT PRIMARY KEY,
                value BLOB NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS sync_changes(
+               kind TEXT NOT NULL,
+               key TEXT NOT NULL,
+               seq INTEGER NOT NULL,
+               stamp INTEGER NOT NULL,
+               PRIMARY KEY(kind, key)
+             );
+             CREATE INDEX IF NOT EXISTS ix_sync_changes_seq ON sync_changes(seq);",
         )?;
         Ok(Self {
             connection,
             key,
             app_dir: app_dir.to_owned(),
+            quiet: Cell::new(0),
         })
+    }
+
+    /// Выполнить изменения, не записывая их в журнал синхронизации.
+    pub fn quietly<T>(&self, action: impl FnOnce() -> T) -> T {
+        self.quiet.set(self.quiet.get() + 1);
+        let result = action();
+        self.quiet.set(self.quiet.get() - 1);
+        result
+    }
+
+    /// Отметить изменение записи для других устройств аккаунта. Отметка времени строго растёт
+    /// для каждой записи: при встречных правках побеждает более поздняя.
+    fn touch(&self, kind: &str, key: &str) -> Result<(), CoreError> {
+        if self.quiet.get() > 0 {
+            return Ok(());
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let seq = self.sync_max_seq()? + 1;
+        self.connection.execute(
+            "INSERT INTO sync_changes(kind,key,seq,stamp) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(kind,key) DO UPDATE SET
+               seq=excluded.seq,
+               stamp=MAX(excluded.stamp, sync_changes.stamp+1)",
+            params![kind, key, seq, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn sync_stamp(&self, kind: &str, key: &str) -> Result<Option<i64>, CoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT stamp FROM sync_changes WHERE kind=?1 AND key=?2",
+                [kind, key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Запомнить версию записи, принятой с другого устройства, не ставя её в очередь отправки.
+    pub fn set_sync_stamp(&self, kind: &str, key: &str, stamp: i64) -> Result<(), CoreError> {
+        self.connection.execute(
+            "INSERT INTO sync_changes(kind,key,seq,stamp) VALUES(?1,?2,0,?3)
+             ON CONFLICT(kind,key) DO UPDATE SET stamp=MAX(excluded.stamp, sync_changes.stamp)",
+            params![kind, key, stamp],
+        )?;
+        Ok(())
+    }
+
+    pub fn sync_changes_since(&self, seq: i64, limit: usize) -> Result<Vec<SyncChange>, CoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT kind,key,seq,stamp FROM sync_changes WHERE seq>?1 ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![seq, limit as i64], |row| {
+            Ok(SyncChange {
+                kind: row.get(0)?,
+                key: row.get(1)?,
+                seq: row.get(2)?,
+                stamp: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn sync_max_seq(&self) -> Result<i64, CoreError> {
+        Ok(self
+            .connection
+            .query_row("SELECT COALESCE(MAX(seq),0) FROM sync_changes", [], |row| row.get(0))?)
+    }
+
+    /// Устройство ещё ничего не делало: ни ящика, ни переписки, ни профиля. Такое можно без
+    /// потерь отдать под вход в существующий аккаунт.
+    pub fn is_pristine(&self) -> Result<bool, CoreError> {
+        let used: i64 = self.connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM contacts)+(SELECT COUNT(*) FROM events)
+                   +(SELECT COUNT(*) FROM groups)+(SELECT COUNT(*) FROM channels)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(used == 0 && self.mailbox()?.is_none() && self.profile()?.display_name.is_empty())
+    }
+
+    /// Полная очистка при выходе из аккаунта: переписка, ключи, ящик и вложения. Остаётся только
+    /// адрес Node, чтобы снова войти можно было сразу.
+    pub fn wipe(&self) -> Result<(), CoreError> {
+        let mut settings = self.settings()?;
+        settings.directory_sequence = 0;
+        settings.directory_published_at_unix_milliseconds = 0;
+        settings.publish_presence = false;
+        let transaction = self.connection.unchecked_transaction()?;
+        for table in [
+            "meta",
+            "contacts",
+            "events",
+            "revoked_devices",
+            "ratchet_sessions",
+            "peer_routing",
+            "mailbox_grants",
+            "outbox",
+            "pending_uploads",
+            "event_manifests",
+            "pending_blobs",
+            "seen_events",
+            "groups",
+            "group_pending_states",
+            "channels",
+            "channel_pending_states",
+            "channel_subscribers",
+            "channel_posts",
+            "channel_views",
+            "channel_reactions",
+            "channel_post_stats",
+            "sync_changes",
+        ] {
+            transaction.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        transaction.commit()?;
+        self.save_settings(&settings)?;
+        let attachments = self.app_dir.join("local-first").join("attachments");
+        if attachments.exists() {
+            let _ = std::fs::remove_dir_all(&attachments);
+        }
+        Ok(())
+    }
+
+    pub fn account(&self) -> Result<Option<crate::account::LocalAccount>, CoreError> {
+        self.get_meta("account")
+    }
+
+    pub fn save_account(&self, value: &crate::account::LocalAccount) -> Result<(), CoreError> {
+        self.set_meta("account", value)
+    }
+
+    /// Имена устройств аккаунта: подписанный список устройств их не содержит, поэтому они
+    /// расходятся отдельно, через синхронизацию.
+    pub fn device_names(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::account::DeviceName>, CoreError> {
+        Ok(self.get_meta("device-names")?.unwrap_or_default())
+    }
+
+    pub fn save_device_name(
+        &self,
+        device_id: &str,
+        value: &crate::account::DeviceName,
+    ) -> Result<(), CoreError> {
+        let mut names = self.device_names()?;
+        names.insert(device_id.to_owned(), value.clone());
+        self.set_meta("device-names", &names)?;
+        self.touch(SYNC_DEVICE_NAME, device_id)
+    }
+
+    /// Свой адрес надо опубликовать заново: например, изменился список устройств.
+    pub fn forget_own_routing(&self) -> Result<(), CoreError> {
+        self.connection.execute("DELETE FROM meta WHERE key='own-routing'", [])?;
+        Ok(())
     }
 
     pub fn load_or_create_identity(&self) -> Result<StoredIdentity, CoreError> {
@@ -230,7 +420,8 @@ impl Store {
     }
 
     pub fn save_profile(&self, profile: &Profile) -> Result<(), CoreError> {
-        self.set_meta("profile", profile)
+        self.set_meta("profile", profile)?;
+        self.touch(SYNC_PROFILE, "")
     }
 
     pub fn settings(&self) -> Result<Settings, CoreError> {
@@ -276,7 +467,7 @@ impl Store {
              ON CONFLICT(user_id) DO UPDATE SET added_at_ms=excluded.added_at_ms,value=excluded.value",
             params![contact.user_id, contact.added_at_unix_milliseconds, self.encrypt_json(contact)?],
         )?;
-        Ok(())
+        self.touch(SYNC_CONTACT, &contact.user_id)
     }
 
     pub fn delete_contact(&self, user_id: &str) -> Result<(), CoreError> {
@@ -314,6 +505,7 @@ impl Store {
                 )?;
             }
             transaction.commit()?;
+            self.touch(SYNC_CONTACT, user_id)?;
         }
         Ok(())
     }
@@ -336,7 +528,7 @@ impl Store {
                 self.encrypt_json(message)?
             ],
         )?;
-        Ok(())
+        self.touch(SYNC_MESSAGE, &message.event_id)
     }
 
     pub fn message(&self, event_id: &str) -> Result<Option<Message>, CoreError> {
@@ -393,8 +585,27 @@ impl Store {
 
     /// Очистка истории диалога с сохранением самого контакта.
     pub fn clear_conversation(&self, conversation_id: &str) -> Result<(), CoreError> {
+        self.touch_events("conversation_id=?1", conversation_id)?;
         self.connection
             .execute("DELETE FROM events WHERE conversation_id=?1", [conversation_id])?;
+        Ok(())
+    }
+
+    /// Удаляемые сообщения тоже попадают в журнал: другие устройства удалят их у себя.
+    fn touch_events(&self, condition: &str, value: &str) -> Result<(), CoreError> {
+        if self.quiet.get() > 0 {
+            return Ok(());
+        }
+        let ids: Vec<String> = {
+            let mut statement = self
+                .connection
+                .prepare(&format!("SELECT event_id FROM events WHERE {condition}"))?;
+            let rows = statement.query_map([value], |row| row.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for id in ids {
+            self.touch(SYNC_MESSAGE, &id)?;
+        }
         Ok(())
     }
 
@@ -697,7 +908,41 @@ impl Store {
                 self.encrypt_json(grant)?
             ],
         )?;
-        Ok(())
+        self.touch(SYNC_GRANT, &format!("{user_id}|{device_id}|{}", grant.mailbox_id))
+    }
+
+    /// Все живые ключи записи в чужие ящики: другие устройства аккаунта получают их, чтобы
+    /// писать собеседникам сразу, не дожидаясь их ответа.
+    pub fn all_grants(&self) -> Result<Vec<(String, String, MailboxGrant)>, CoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT user_id,device_id,value FROM mailbox_grants WHERE expires_at_ms>?1",
+        )?;
+        let rows = statement.query_map([chrono::Utc::now().timestamp_millis()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
+        })?;
+        let mut grants = Vec::new();
+        for row in rows {
+            let (user_id, device_id, value) = row?;
+            grants.push((user_id, device_id, self.decrypt_json(&value)?));
+        }
+        Ok(grants)
+    }
+
+    pub fn grant(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        mailbox_id: &str,
+    ) -> Result<Option<MailboxGrant>, CoreError> {
+        let value = self
+            .connection
+            .query_row(
+                "SELECT value FROM mailbox_grants WHERE user_id=?1 AND device_id=?2 AND mailbox_id=?3",
+                [user_id, device_id, mailbox_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        value.map(|bytes| self.decrypt_json(&bytes)).transpose()
     }
 
     pub fn enqueue_outbox(
@@ -828,7 +1073,7 @@ impl Store {
              ON CONFLICT(group_id) DO UPDATE SET value=excluded.value",
             params![record.state.group_id, self.encrypt_json(record)?],
         )?;
-        Ok(())
+        self.touch(SYNC_GROUP, &record.state.group_id)
     }
 
     pub fn save_pending_group_state(&self, value: &PendingGroupState) -> Result<(), CoreError> {
@@ -903,7 +1148,7 @@ impl Store {
              ON CONFLICT(channel_id) DO UPDATE SET value=excluded.value",
             params![record.state.channel_id, self.encrypt_json(record)?],
         )?;
-        Ok(())
+        self.touch(SYNC_CHANNEL, &record.state.channel_id)
     }
 
     pub fn save_pending_channel_state(&self, value: &PendingChannelState) -> Result<(), CoreError> {
@@ -987,10 +1232,23 @@ impl Store {
              ON CONFLICT(channel_id,user_id) DO UPDATE SET value=excluded.value",
             params![channel_id, value.user_id, self.encrypt_json(value)?],
         )?;
+        self.touch(SYNC_CHANNEL_SUBSCRIBER, &subscriber_key(channel_id, &value.user_id))
+    }
+
+    pub fn delete_channel_subscriber(&self, channel_id: &str, user_id: &str) -> Result<(), CoreError> {
+        self.connection.execute(
+            "DELETE FROM channel_subscribers WHERE channel_id=?1 AND user_id=?2",
+            [channel_id, user_id],
+        )?;
         Ok(())
     }
 
     pub fn clear_channel_subscribers(&self, channel_id: &str) -> Result<(), CoreError> {
+        if self.quiet.get() == 0 {
+            for subscriber in self.channel_subscribers(channel_id)? {
+                self.touch(SYNC_CHANNEL_SUBSCRIBER, &subscriber_key(channel_id, &subscriber.user_id))?;
+            }
+        }
         self.connection.execute(
             "DELETE FROM channel_subscribers WHERE channel_id=?1",
             [channel_id],
@@ -1014,7 +1272,19 @@ impl Store {
                 self.encrypt_json(value)?
             ],
         )?;
-        Ok(())
+        self.touch(SYNC_CHANNEL_POST, &value.post.event.event_id)
+    }
+
+    /// Канал и время поста — чтобы воссоздать запись поста на другом устройстве.
+    pub fn channel_post_place(&self, event_id: &str) -> Result<Option<(String, i64)>, CoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT channel_id,created_at_ms FROM channel_posts WHERE event_id=?1",
+                [event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
     }
 
     pub fn channel_post(&self, event_id: &str) -> Result<Option<StoredChannelPost>, CoreError> {
@@ -1050,7 +1320,7 @@ impl Store {
     pub fn delete_channel_post(&self, event_id: &str) -> Result<(), CoreError> {
         self.connection
             .execute("DELETE FROM channel_posts WHERE event_id=?1", [event_id])?;
-        Ok(())
+        self.touch(SYNC_CHANNEL_POST, event_id)
     }
 
     /// Возвращает `true`, если этот читатель засчитан впервые.
@@ -1138,11 +1408,12 @@ impl Store {
     pub fn delete_message(&self, event_id: &str) -> Result<(), CoreError> {
         self.connection
             .execute("DELETE FROM events WHERE event_id=?1", [event_id])?;
-        Ok(())
+        self.touch(SYNC_MESSAGE, event_id)
     }
 
     /// Все ветки комментариев канала хранятся как диалоги `<ChannelID>/<пост>`.
     pub fn clear_conversations_with_prefix(&self, prefix: &str) -> Result<(), CoreError> {
+        self.touch_events("substr(conversation_id,1,length(?1))=?1", prefix)?;
         self.connection.execute(
             "DELETE FROM events WHERE substr(conversation_id,1,length(?1))=?1",
             [prefix],
@@ -1228,7 +1499,7 @@ impl Store {
         Ok(())
     }
 
-    fn all_messages(&self) -> Result<Vec<Message>, CoreError> {
+    pub fn all_messages(&self) -> Result<Vec<Message>, CoreError> {
         let mut statement = self
             .connection
             .prepare("SELECT value FROM events ORDER BY created_at_ms")?;
@@ -1296,4 +1567,8 @@ impl Store {
     fn decrypt_json<T: DeserializeOwned>(&self, value: &[u8]) -> Result<T, CoreError> {
         Ok(serde_json::from_slice(&self.decrypt_bytes(value)?)?)
     }
+}
+
+pub fn subscriber_key(channel_id: &str, user_id: &str) -> String {
+    format!("{channel_id}|{user_id}")
 }

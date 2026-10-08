@@ -14,10 +14,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
 
+mod account;
 mod calls;
 mod channels;
 mod delivery;
 mod groups;
+mod sync;
 
 use crate::{
     CoreError,
@@ -148,6 +150,9 @@ impl MediaJob {
     }
 }
 
+/// Профиль и username продлеваются на Node раз в неделю: запись там живёт 30 дней.
+const DIRECTORY_RENEW_MILLISECONDS: i64 = 7 * 86_400_000;
+
 /// Опрос «последней активности» контактов: реже, чем сама синхронизация.
 const PRESENCE_POLL_INTERVAL_MILLISECONDS: i64 = 60_000;
 const PRESENCE_POLL_CONTACTS: usize = 50;
@@ -172,6 +177,10 @@ pub struct AppCore {
     selected_thread: Option<String>,
     /// Текущий звонок. Свой замок: аудиопотоки и интерфейс читают его, не дожидаясь ядра.
     pub(crate) call_slot: crate::calls::CallSlot,
+    /// Когда список устройств аккаунта последний раз сверялся с Node.
+    last_device_refresh_unix_milliseconds: i64,
+    /// Сообщение для экрана входа, которое переживает стирание локальных данных.
+    account_notice: Option<String>,
 }
 
 impl AppCore {
@@ -195,6 +204,8 @@ impl AppCore {
             watch: Arc::new(Mutex::new(watch)),
             selected_thread: None,
             call_slot: Default::default(),
+            last_device_refresh_unix_milliseconds: 0,
+            account_notice: None,
         })
     }
 
@@ -598,6 +609,16 @@ impl AppCore {
                     about: about.trim().to_owned(),
                     avatar_base64,
                 };
+                // Username — логин аккаунта: пустым он быть не может, а новый должен быть
+                // свободен на Node. Логин на Node меняется вместе с ним.
+                if self.store.account()?.is_some() {
+                    if profile.username.is_empty() {
+                        return Err(CoreError::InvalidInput(
+                            "Username нужен для входа в аккаунт — его нельзя оставить пустым".to_owned(),
+                        ));
+                    }
+                    self.change_account_username(&profile.username)?;
+                }
                 self.store.save_profile(&profile)?;
                 self.status = "Профиль сохранён локально".to_owned();
             }
@@ -608,11 +629,17 @@ impl AppCore {
                         "Сначала заполните видимое имя".to_owned(),
                     ));
                 }
-                self.status = if self.publish_directory(&profile)? {
-                    "Профиль опубликован: вас найдут по username".to_owned()
-                } else {
-                    "Публиковать профиль может только корневое устройство".to_owned()
-                };
+                match self.publish_directory(&profile) {
+                    Ok(true) => self.status = "Профиль опубликован: вас найдут по username".to_owned(),
+                    Ok(false) => {
+                        self.status =
+                            "Публиковать профиль может только корневое устройство".to_owned()
+                    }
+                    Err(error) => {
+                        self.note_publish_error(&error);
+                        return Err(error);
+                    }
+                }
             }
             Command::Connect { bootstrap_url } => {
                 let expected = expected_node_for(&bootstrap_url);
@@ -916,19 +943,78 @@ impl AppCore {
                 self.status = "Сеть импортирована и проверена".to_owned();
             }
             Command::RevokeDevice { device_id } => {
-                if !self.identity.is_authority() {
-                    return Err(CoreError::InvalidInput(
-                        "Отзыв доступен только корневому устройству".to_owned(),
-                    ));
-                }
+                // Сначала свежий список с Node: иначе можно затереть только что вошедшее устройство.
+                let node = self.require_node()?;
+                self.refresh_account_devices(&node)?;
                 if device_id == self.identity.public.device_id {
                     return Err(CoreError::InvalidInput(
-                        "Нельзя отозвать текущее устройство".to_owned(),
+                        "Чтобы выйти на этом устройстве, используйте «Выйти из аккаунта»".to_owned(),
                     ));
                 }
-                self.store.revoke_device(&device_id)?;
-                self.status = "Устройство добавлено в подписанный список отзыва".to_owned();
+                // Пока устройство ещё в списке, ему уходит сигнал: оно выйдет сразу, а не при
+                // следующей сверке списка. Если оно сейчас не в сети — узнает при сверке.
+                let me = self.identity.public.user_id.clone();
+                self.queue_event(
+                    &me,
+                    &format!("evt1-{}", random_hex(16)),
+                    crate::protocol::KIND_DEVICE_SIGNED_OUT,
+                    &sync::DevicePayload {
+                        version: PROTOCOL_VERSION,
+                        device_id: device_id.clone(),
+                    },
+                )?;
+                self.deliver_now();
+                self.remove_device_from_account(&device_id, "revoked")?;
+                self.ensure_transport(&node)?;
+                self.status = "Сеанс завершён: устройство больше не получит сообщений".to_owned();
             }
+            Command::CheckUsername { username } => {
+                return Ok(Some(self.check_username(&username)?));
+            }
+            Command::AccountRegister {
+                username,
+                display_name,
+                password,
+                device_name,
+            } => {
+                let key = self.register_account(&username, &display_name, &password, &device_name)?;
+                return Ok(Some(json!({ "recoveryKey": key })));
+            }
+            Command::AccountLogin {
+                username,
+                password,
+                device_name,
+                discard_local,
+            } => self.login_account(&username, &password, &device_name, discard_local)?,
+            Command::AccountRecover {
+                recovery_key,
+                new_password,
+                device_name,
+                discard_local,
+            } => {
+                let key =
+                    self.recover_account(&recovery_key, &new_password, &device_name, discard_local)?;
+                return Ok(Some(json!({ "recoveryKey": key })));
+            }
+            Command::AccountChangePassword {
+                old_password,
+                new_password,
+            } => self.change_password(&old_password, &new_password)?,
+            Command::AccountNewRecoveryKey { password } => {
+                let key = self.regenerate_recovery_key(&password)?;
+                return Ok(Some(json!({ "recoveryKey": key })));
+            }
+            Command::AccountConfirmRecoveryKey => {
+                let mut local = self.require_account()?;
+                local.pending_recovery_key = None;
+                self.store.save_account(&local)?;
+            }
+            Command::AccountLogout => self.logout()?,
+            Command::AccountRenameDevice { name } => {
+                self.name_this_device(&name)?;
+                self.status = "Имя устройства сохранено".to_owned();
+            }
+            Command::AccountDismissNotice => self.account_notice = None,
             Command::CreateGroup {
                 name,
                 about,
@@ -1538,6 +1624,12 @@ impl AppCore {
     }
 
     fn sync(&mut self) -> Result<(), CoreError> {
+        // Чистое устройство до входа или регистрации ничего не публикует: его временная
+        // личность может быть тут же заменена личностью аккаунта.
+        if self.store.account()?.is_none() && self.store.is_pristine()? {
+            self.status = "Войдите в аккаунт или создайте новый".to_owned();
+            return Ok(());
+        }
         let settings = self.store.settings()?;
         let descriptor = self.network.descriptor(
             &settings.bootstrap_url,
@@ -1546,8 +1638,13 @@ impl AppCore {
         self.online = true;
         let now = chrono::Utc::now().timestamp_millis();
         let profile = self.store.profile()?;
-        if settings.directory_sequence == 0 && !profile.display_name.trim().is_empty() {
-            let _ = self.publish_directory(&profile);
+        let directory_stale = settings.directory_sequence == 0
+            || now - settings.directory_published_at_unix_milliseconds > DIRECTORY_RENEW_MILLISECONDS;
+        if directory_stale
+            && !profile.display_name.trim().is_empty()
+            && let Err(error) = self.publish_directory(&profile)
+        {
+            self.note_publish_error(&error);
         }
         if now - self.last_presence_poll_unix_milliseconds >= PRESENCE_POLL_INTERVAL_MILLISECONDS {
             self.last_presence_poll_unix_milliseconds = now;
@@ -1558,7 +1655,8 @@ impl AppCore {
                 if let Ok(Some(seen)) = self.network.presence(&descriptor, &contact.user_id) {
                     if contact.last_seen_unix_milliseconds != Some(seen) {
                         contact.last_seen_unix_milliseconds = Some(seen);
-                        self.store.save_contact(&contact)?;
+                        // Каждое устройство опрашивает активность само: рассылать её незачем.
+                        self.store.quietly(|| self.store.save_contact(&contact))?;
                     }
                 }
             }
@@ -1571,6 +1669,11 @@ impl AppCore {
         self.start_pending_downloads();
         let received = self.fetch_inbox(&descriptor)?;
         self.settle_calls();
+        self.account_maintenance(&descriptor);
+        if self.store.account()?.is_none() && self.store.is_pristine()? {
+            // Сеанс завершили с другого устройства прямо сейчас.
+            return Ok(());
+        }
         if let Err(error) = self.broadcast_channel_stats() {
             self.status = format!("Счётчики канала не разосланы: {error}");
         }
@@ -1655,6 +1758,7 @@ impl AppCore {
         }
 
         settings.directory_sequence = sequence;
+        settings.directory_published_at_unix_milliseconds = now;
         self.store.save_settings(&settings)?;
         self.online = true;
         Ok(true)
@@ -1884,9 +1988,11 @@ impl AppCore {
                 .messages(&conversation_id(&self.identity.public.user_id, user_id))?,
             None => Vec::new(),
         };
+        let account = self.account_view()?;
         Ok(Snapshot {
             identity: self.identity.public.clone(),
-            onboarding_required: profile.display_name.is_empty(),
+            onboarding_required: account.state == "none",
+            account,
             profile,
             chats,
             selected_contact_id: self.selected_contact.clone(),
@@ -2131,6 +2237,15 @@ impl AppCore {
             group: None,
             channel: None,
             comments: Vec::new(),
+            account: crate::models::AccountView {
+                state: "none".to_owned(),
+                username: String::new(),
+                node: String::new(),
+                recovery_key: None,
+                username_conflict: false,
+                notice: None,
+                devices: Vec::new(),
+            },
         }
     }
 }

@@ -90,6 +90,30 @@ pub struct NodeDescriptor {
     pub signature: String,
 }
 
+/// Ответ Node на вход или восстановление: всё зашифровано, кроме служебных номеров версий.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSecretsWire {
+    pub account_id: String,
+    pub wrapped_key: String,
+    pub vault: String,
+    pub vault_version: i64,
+    pub snapshot_version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountMetaWire {
+    pub snapshot_version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultWire {
+    pub vault: String,
+    pub version: i64,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UsernameWire {
@@ -326,17 +350,232 @@ impl Network {
             node.base_url.trim_end_matches('/'),
             username
         );
-        self.put_claim(
-            &uri,
-            json!({
+        let response = self
+            .http
+            .put(uri)
+            .json(&json!({
                 "userId": user_id,
                 "identityPublicKey": identity_public_key,
                 "sequence": sequence,
                 "claimJson": claim_json,
                 "signature": signature,
                 "expiresAt": rfc3339(expires_at_unix_milliseconds)?,
-            }),
-        )
+            }))
+            .send()?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Err(CoreError::UsernameTaken(username.to_owned()));
+        }
+        checked(response)?;
+        Ok(())
+    }
+
+    /// Свободен ли username на этом Node для этого пользователя.
+    pub fn username_available(
+        &self,
+        node: &NodeDescriptor,
+        username: &str,
+        user_id: &str,
+    ) -> Result<bool, CoreError> {
+        let username = normalize_username(username)?;
+        let uri = format!(
+            "{}/v2/usernames/{}",
+            node.base_url.trim_end_matches('/'),
+            username
+        );
+        let records: Vec<UsernameWire> = checked(self.http.get(uri).send()?)?.json()?;
+        Ok(records.iter().all(|record| record.user_id == user_id))
+    }
+
+    pub fn account_salt(&self, base_url: &str, login_lookup: &str) -> Result<String, CoreError> {
+        let response = self
+            .http
+            .post(format!("{}/v2/accounts/login/salt", base_url.trim_end_matches('/')))
+            .json(&json!({ "loginLookup": login_lookup }))
+            .send()?;
+        let value: serde_json::Value = account_checked(response, "", "")?.json()?;
+        value["passwordSalt"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| CoreError::Node("Node не прислал соль пароля".to_owned()))
+    }
+
+    pub fn create_account(
+        &self,
+        base_url: &str,
+        credentials: &crate::account::ServerCredentials,
+        vault: &str,
+        proof_nonce: &str,
+    ) -> Result<String, CoreError> {
+        let mut body = serde_json::to_value(credentials)?;
+        body["vault"] = json!(vault);
+        body["proofNonce"] = json!(proof_nonce);
+        let response = self
+            .http
+            .post(format!("{}/v2/accounts", base_url.trim_end_matches('/')))
+            .json(&body)
+            .send()?;
+        let value: serde_json::Value = account_checked(
+            response,
+            "",
+            "Этот логин уже зарегистрирован на этом Node — выберите другой username",
+        )?
+        .json()?;
+        value["accountId"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| CoreError::Node("Node не прислал номер аккаунта".to_owned()))
+    }
+
+    pub fn login_account(
+        &self,
+        base_url: &str,
+        login_lookup: &str,
+        password_auth: &str,
+    ) -> Result<AccountSecretsWire, CoreError> {
+        let response = self
+            .http
+            .post(format!("{}/v2/accounts/login", base_url.trim_end_matches('/')))
+            .json(&json!({ "loginLookup": login_lookup, "passwordAuth": password_auth }))
+            .send()?;
+        Ok(account_checked(response, "Неверный логин или пароль", "")?.json()?)
+    }
+
+    pub fn recover_account(
+        &self,
+        base_url: &str,
+        recovery_lookup: &str,
+        recovery_auth: &str,
+    ) -> Result<AccountSecretsWire, CoreError> {
+        let response = self
+            .http
+            .post(format!("{}/v2/accounts/recover", base_url.trim_end_matches('/')))
+            .json(&json!({ "recoveryLookup": recovery_lookup, "recoveryAuth": recovery_auth }))
+            .send()?;
+        Ok(account_checked(
+            response,
+            "Ключ восстановления не подошёл: такого аккаунта на этом Node нет",
+            "",
+        )?
+        .json()?)
+    }
+
+    pub fn account_meta(
+        &self,
+        base_url: &str,
+        account_id: &str,
+        access: &str,
+    ) -> Result<AccountMetaWire, CoreError> {
+        let response = self
+            .http
+            .get(format!("{}/v2/accounts/{account_id}", base_url.trim_end_matches('/')))
+            .header("X-Account-Access", access)
+            .send()?;
+        Ok(account_checked(response, ACCOUNT_GONE, "")?.json()?)
+    }
+
+    pub fn account_vault(
+        &self,
+        base_url: &str,
+        account_id: &str,
+        access: &str,
+    ) -> Result<VaultWire, CoreError> {
+        let response = self
+            .http
+            .get(format!("{}/v2/accounts/{account_id}/vault", base_url.trim_end_matches('/')))
+            .header("X-Account-Access", access)
+            .send()?;
+        Ok(account_checked(response, ACCOUNT_GONE, "")?.json()?)
+    }
+
+    /// Новая версия сейфа. `None` — сейф успели изменить с другого устройства.
+    pub fn put_account_vault(
+        &self,
+        base_url: &str,
+        account_id: &str,
+        access: &str,
+        vault: &str,
+        expected_version: i64,
+    ) -> Result<Option<i64>, CoreError> {
+        let response = self
+            .http
+            .put(format!("{}/v2/accounts/{account_id}/vault", base_url.trim_end_matches('/')))
+            .header("X-Account-Access", access)
+            .json(&json!({ "vault": vault, "expectedVersion": expected_version }))
+            .send()?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Ok(None);
+        }
+        let value: serde_json::Value = account_checked(response, ACCOUNT_GONE, "")?.json()?;
+        Ok(value["version"].as_i64())
+    }
+
+    /// Смена пароля, логина или ключа восстановления. Поля, которых нет в `changes`, не меняются.
+    pub fn put_account_credentials(
+        &self,
+        base_url: &str,
+        account_id: &str,
+        access: &str,
+        changes: &serde_json::Value,
+    ) -> Result<(), CoreError> {
+        let response = self
+            .http
+            .put(format!("{}/v2/accounts/{account_id}/credentials", base_url.trim_end_matches('/')))
+            .header("X-Account-Access", access)
+            .json(changes)
+            .send()?;
+        account_checked(
+            response,
+            ACCOUNT_GONE,
+            "Этот логин уже зарегистрирован на этом Node — выберите другой username",
+        )?;
+        Ok(())
+    }
+
+    /// Снимок данных аккаунта. `None` — снимка ещё нет.
+    pub fn account_snapshot(
+        &self,
+        base_url: &str,
+        account_id: &str,
+        access: &str,
+    ) -> Result<Option<(Vec<u8>, i64)>, CoreError> {
+        let response = transfer_client()?
+            .get(format!("{}/v2/accounts/{account_id}/snapshot", base_url.trim_end_matches('/')))
+            .header("X-Account-Access", access)
+            .send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = account_checked(response, ACCOUNT_GONE, "")?;
+        let version = response
+            .headers()
+            .get("X-Snapshot-Version")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0);
+        Ok(Some((response.bytes()?.to_vec(), version)))
+    }
+
+    /// Выложить снимок поверх версии `base_version`. `None` — на Node уже более новый.
+    pub fn put_account_snapshot(
+        &self,
+        base_url: &str,
+        account_id: &str,
+        access: &str,
+        data: Vec<u8>,
+        base_version: i64,
+    ) -> Result<Option<i64>, CoreError> {
+        let response = transfer_client()?
+            .put(format!("{}/v2/accounts/{account_id}/snapshot", base_url.trim_end_matches('/')))
+            .header("X-Account-Access", access)
+            .header("X-Snapshot-Base-Version", base_version.to_string())
+            .header("Content-Type", "application/octet-stream")
+            .body(data)
+            .send()?;
+        if response.status() == reqwest::StatusCode::CONFLICT {
+            return Ok(None);
+        }
+        let value: serde_json::Value = account_checked(response, ACCOUNT_GONE, "")?.json()?;
+        Ok(value["version"].as_i64())
     }
 
     /// Публикация «последней активности». Вызывается только при явном согласии.
@@ -863,6 +1102,48 @@ fn checked(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
     Err(CoreError::Node(message))
+}
+
+const ACCOUNT_GONE: &str = "Аккаунт не найден на Node: возможно, он удалён или перенесён";
+
+/// Отказ Node по аккаунту — человеческими словами. 401 и 409 значат разное в разных вызовах,
+/// поэтому текст для них передаёт вызывающий; 429 — всегда блокировка после неудачных попыток.
+fn account_checked(
+    response: reqwest::blocking::Response,
+    unauthorized: &str,
+    conflict: &str,
+) -> Result<reqwest::blocking::Response, CoreError> {
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED && !unauthorized.is_empty() {
+        return Err(CoreError::InvalidInput(unauthorized.to_owned()));
+    }
+    if status == reqwest::StatusCode::CONFLICT && !conflict.is_empty() {
+        return Err(CoreError::InvalidInput(conflict.to_owned()));
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let body = response.text().unwrap_or_default();
+        let minutes = body
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|part| part.parse::<u32>().ok())
+            .next();
+        return Err(CoreError::InvalidInput(match minutes {
+            Some(minutes) => format!(
+                "Слишком много неудачных попыток. Попробуйте снова через {minutes} мин."
+            ),
+            None => "Слишком много попыток. Подождите минуту и попробуйте снова.".to_owned(),
+        }));
+    }
+    checked(response)
+}
+
+/// Снимок данных может весить мегабайты: на мобильной сети ему нужен свой, долгий таймаут.
+fn transfer_client() -> Result<reqwest::blocking::Client, CoreError> {
+    Ok(reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(180))
+        .https_only(false)
+        .user_agent("Turat-Native/3.0")
+        .build()?)
 }
 
 fn validate_node_url(url: &str) -> Result<(), CoreError> {

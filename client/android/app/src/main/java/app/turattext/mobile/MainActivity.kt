@@ -80,8 +80,6 @@ class MainActivity : ComponentActivity() {
                     channelLink.value = null
                     model.execute(CoreJson.command("subscribe_channel", "link" to value))
                 }
-                var pendingImport by remember { mutableStateOf<Pair<String, String>?>(null) }
-                var pendingExport by remember { mutableStateOf<Triple<String, String, String>?>(null) }
                 var pendingAttachmentSave by remember { mutableStateOf<String?>(null) }
 
                 var pendingSendChoice by remember { mutableStateOf<SendChoice?>(null) }
@@ -208,24 +206,6 @@ class MainActivity : ComponentActivity() {
                         )
                     )
                 }
-                val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-                    val action = pendingImport
-                    pendingImport = null
-                    if (uri == null || action == null) return@rememberLauncherForActivityResult
-                    val path = copyToCache(this, uri, "import")
-                    model.execute(CoreJson.command(action.first, "path" to path, "passphrase" to action.second))
-                }
-                val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
-                    val action = pendingExport
-                    pendingExport = null
-                    if (uri == null || action == null) return@rememberLauncherForActivityResult
-                    val temp = File(cacheDir, "${action.first}-${System.nanoTime()}.tmp")
-                    model.execute(CoreJson.command(action.first, "path" to temp.absolutePath, "passphrase" to action.second)) { ok ->
-                        if (ok) contentResolver.openOutputStream(uri)?.use { out -> temp.inputStream().use { it.copyTo(out) } }
-                        temp.delete()
-                    }
-                }
-
                 val actions = remember(model) {
                     AppActions(
                         selectContact = model::select,
@@ -262,14 +242,6 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         cancelTransfer = model::cancelUpload,
-                        export = { command, passphrase, fileName ->
-                            pendingExport = Triple(command, passphrase, fileName)
-                            exporter.launch(fileName)
-                        },
-                        importFile = { command, passphrase, mimeTypes ->
-                            pendingImport = command to passphrase
-                            importer.launch(mimeTypes)
-                        },
                         checkUpdates = model::checkForUpdates,
                         installUpdate = model::installUpdate,
                         cancelUpdate = model::cancelUpdate,

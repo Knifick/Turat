@@ -228,6 +228,26 @@ data class Settings(
     val bootstrapUrl: String = "", val metadataProtection: String = "balanced",
     val publishPresence: Boolean = false,
 )
+
+/** Устройство аккаунта в списке сеансов. */
+data class AccountDevice(val deviceId: String, val name: String, val current: Boolean, val addedAt: Long)
+
+/**
+ * Учётная запись. `state`: `none` — устройство чистое, нужен вход или регистрация; `legacy` —
+ * переписка есть, а аккаунта ещё нет; `active` — вход выполнен.
+ */
+data class AccountView(
+    val state: String = "none",
+    val username: String = "",
+    val node: String = "",
+    /** Ключ восстановления, который надо показать один раз. */
+    val recoveryKey: String? = null,
+    val usernameConflict: Boolean = false,
+    val notice: String? = null,
+    val devices: List<AccountDevice> = emptyList(),
+) {
+    val signedIn get() = state == "active"
+}
 data class AppSnapshot(
     val identity: Identity = Identity(), val profile: Profile = Profile(), val chats: List<Chat> = emptyList(),
     val selectedContactId: String? = null, val messages: List<Message> = emptyList(), val settings: Settings = Settings(),
@@ -237,6 +257,7 @@ data class AppSnapshot(
     val channel: ChannelInfo? = null,
     /** Комментарии открытого поста канала (`channel.threadPostEventId`). */
     val comments: List<Message> = emptyList(),
+    val account: AccountView = AccountView(),
 ) {
     val selectedChat get() = chats.firstOrNull { it.contact.userId == selectedContactId }
     val selectedContact get() = selectedChat?.contact
@@ -299,12 +320,30 @@ object CoreJson {
         },
         online = value.getBoolean("online"), statusMessage = value.optString("statusMessage"),
         onboardingRequired = value.getBoolean("onboardingRequired"),
+        account = value.optJSONObject("account")?.let(::account) ?: AccountView(),
         searchQuery = value.optString("searchQuery"),
         searchResults = value.optJSONArray("searchResults")?.objects().orEmpty().map {
             SearchHit(
                 it.getString("eventId"), it.getString("userId"), it.getString("displayName"),
                 it.optStringOrNull("avatarBase64"), it.optString("text"),
                 it.getLong("createdAtUnixMilliseconds"), it.getBoolean("outgoing"),
+            )
+        },
+    )
+
+    private fun account(it: JSONObject) = AccountView(
+        state = it.optString("state", "none"),
+        username = it.optString("username"),
+        node = it.optString("node"),
+        recoveryKey = it.optStringOrNull("recoveryKey"),
+        usernameConflict = it.optBoolean("usernameConflict"),
+        notice = it.optStringOrNull("notice"),
+        devices = it.optJSONArray("devices")?.objects().orEmpty().map { device ->
+            AccountDevice(
+                device.getString("deviceId"),
+                device.optString("name"),
+                device.optBoolean("current"),
+                device.optLong("addedAtUnixMilliseconds"),
             )
         },
     )

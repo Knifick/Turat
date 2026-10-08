@@ -839,8 +839,8 @@
                             Click="SettingsCategory_Click" Background="Transparent"
                             Foreground="{ThemeResource TgHint}" BorderThickness="0" CornerRadius="13" Padding="8,10">
                         <StackPanel Orientation="Horizontal" Spacing="7">
-                            <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE8B7;" FontSize="14" />
-                            <TextBlock Text="Данные" />
+                            <FontIcon FontFamily="Segoe MDL2 Assets" Glyph="&#xE77B;" FontSize="14" />
+                            <TextBlock Text="Аккаунт" />
                         </StackPanel>
                     </Button>
                 </Grid>
@@ -876,7 +876,7 @@
                         </StackPanel>
                         <TextBlock Text="Профиль" Style="{StaticResource TgSectionTitle}" />
                         <TextBox x:Name="SettingsDisplayName" Header="Видимое имя" />
-                        <TextBox x:Name="SettingsUsername" Header="Username" />
+                        <TextBox x:Name="SettingsUsername" Header="Username — он же логин" />
                         <TextBox x:Name="SettingsAbout" Header="О себе" AcceptsReturn="True" MaxLength="200" />
                         <Button Content="Сохранить и опубликовать" Click="SaveProfile_Click" Margin="0,10,0,0"
                                 Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
@@ -921,27 +921,36 @@
                     </StackPanel>
 
                     <StackPanel x:Name="DataSettingsPanel" Spacing="4" Visibility="Collapsed">
-                        <TextBlock Text="Устройства и резервные копии" Style="{StaticResource TgSectionTitle}" />
-                        <PasswordBox x:Name="SecurityPassphrase" Header="Пароль пакета" />
-                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,10,0,0">
-                            <Button Content="Создать backup" Click="CreateBackup_Click" />
-                            <Button Content="Восстановить backup" Click="RestoreBackup_Click" />
-                        </StackPanel>
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Content="Связать устройство" Click="CreateDeviceLink_Click" />
-                            <Button Content="Импортировать связь" Click="ImportDeviceLink_Click" />
-                        </StackPanel>
-                        <TextBox x:Name="RevokeDeviceInput" Header="DeviceID потерянного устройства" Margin="0,8,0,0" />
-                        <Button Content="Отозвать устройство" Click="RevokeDevice_Click"
-                                Foreground="{ThemeResource TgDanger}" HorizontalAlignment="Left" />
-                        <TextBlock Text="Передача без прямого подключения" Style="{StaticResource TgSectionTitle}" />
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Content="Экспорт сообщений" Click="ExportPortable_Click" />
-                            <Button Content="Доставить пакет" Click="ImportPortable_Click" />
-                        </StackPanel>
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Content="Экспорт сети" Click="ExportDiscovery_Click" />
-                            <Button Content="Импорт сети" Click="ImportDiscovery_Click" />
+                        <TextBlock Text="Аккаунт" Style="{StaticResource TgSectionTitle}" />
+                        <TextBlock x:Name="AccountSummary" Foreground="{ThemeResource TgText}" TextWrapping="Wrap" />
+                        <Button x:Name="SetUpAccountButton" Content="Создать аккаунт" Click="SetUpAccount_Click"
+                                Visibility="Collapsed" HorizontalAlignment="Left" Margin="0,8,0,0"
+                                Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
+                                BorderThickness="0" />
+                        <StackPanel x:Name="AccountManagePanel" Spacing="4">
+                            <TextBlock Text="Сменить пароль" Style="{StaticResource TgSectionTitle}" />
+                            <PasswordBox x:Name="CurrentPasswordInput" Header="Текущий пароль" />
+                            <PasswordBox x:Name="NewPasswordInput" Header="Новый пароль" />
+                            <PasswordBox x:Name="NewPasswordRepeatInput" Header="Новый пароль ещё раз" />
+                            <Button Content="Сменить пароль" Click="ChangePassword_Click" HorizontalAlignment="Left"
+                                    Margin="0,6,0,0" />
+
+                            <TextBlock Text="Ключ восстановления" Style="{StaticResource TgSectionTitle}" />
+                            <TextBlock Text="Новый ключ заменит прежний — старый перестанет действовать."
+                                       Foreground="{ThemeResource TgHint}" FontSize="13" TextWrapping="Wrap" />
+                            <PasswordBox x:Name="RecoveryPasswordInput" Header="Пароль" />
+                            <Button Content="Создать новый ключ" Click="NewRecoveryKey_Click" HorizontalAlignment="Left"
+                                    Margin="0,6,0,0" />
+
+                            <TextBlock Text="Устройства" Style="{StaticResource TgSectionTitle}" />
+                            <TextBlock Foreground="{ThemeResource TgHint}" FontSize="13" TextWrapping="Wrap"
+                                       Text="На всех устройствах — одна переписка. Новое устройство входит по username и паролю, а завершённый сеанс сразу перестаёт получать сообщения." />
+                            <StackPanel x:Name="DevicesPanel" Spacing="2" Margin="0,6,0,0" />
+                            <TextBox x:Name="DeviceNameInput" Header="Имя этого устройства" MaxLength="64" Margin="0,8,0,0" />
+                            <Button Content="Сохранить имя" Click="RenameDevice_Click" HorizontalAlignment="Left"
+                                    Margin="0,6,0,0" />
+                            <Button Content="Выйти из аккаунта" Click="Logout_Click" Foreground="{ThemeResource TgDanger}"
+                                    HorizontalAlignment="Left" Margin="0,18,0,0" />
                         </StackPanel>
 
                         <TextBlock Text="Обновления" Style="{StaticResource TgSectionTitle}" />
@@ -1154,6 +1163,120 @@
         <ProgressBar x:Name="BusyIndicator" Grid.Row="1" Height="2" VerticalAlignment="Top" IsIndeterminate="True"
                      Visibility="Collapsed" Foreground="{ThemeResource TgAccent}" />
 
+        <!-- Вход в Turat: регистрация, вход по username и паролю, восстановление по ключу,
+             показ ключа восстановления и выбор нового username. Перекрывает всё окно, пока
+             пользователь не войдёт. -->
+        <Grid x:Name="AccountPage" Grid.Row="1" Background="{ThemeResource TgWindow}" Visibility="Collapsed">
+            <ScrollViewer>
+                <StackPanel MaxWidth="440" HorizontalAlignment="Center" Padding="24,36,24,32" Spacing="10">
+                    <Image Source="ms-appx:///Assets/Turat.png" Width="96" Height="96"
+                           HorizontalAlignment="Center" Stretch="Uniform" />
+                    <TextBlock x:Name="AccountTitle" FontSize="24" FontWeight="SemiBold" HorizontalAlignment="Center"
+                               Foreground="{ThemeResource TgText}" />
+                    <TextBlock x:Name="AccountDescription" TextWrapping="Wrap" TextAlignment="Center"
+                               Foreground="{ThemeResource TgHint}" FontSize="14" />
+                    <Border x:Name="AccountNotice" Visibility="Collapsed" CornerRadius="14" Padding="14"
+                            Background="{ThemeResource TgElevated}" BorderBrush="{ThemeResource TgGlassRim}"
+                            BorderThickness="1">
+                        <TextBlock x:Name="AccountNoticeText" TextWrapping="Wrap" TextAlignment="Center"
+                                   Foreground="{ThemeResource TgText}" />
+                    </Border>
+
+                    <StackPanel x:Name="AccountWelcomePanel" Spacing="10" Margin="0,10,0,0">
+                        <Button Content="Создать аккаунт" Click="AccountShowRegister_Click" HorizontalAlignment="Stretch"
+                                Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
+                                BorderThickness="0" CornerRadius="18" Padding="12,10" />
+                        <Button Content="У меня уже есть аккаунт" Click="AccountShowLogin_Click"
+                                HorizontalAlignment="Stretch" CornerRadius="18" Padding="12,10" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="AccountRegisterPanel" Spacing="8" Visibility="Collapsed" Margin="0,6,0,0">
+                        <TextBox x:Name="RegisterDisplayName" Header="Видимое имя" MaxLength="64" />
+                        <TextBox x:Name="RegisterUsername" Header="Username (логин)" MaxLength="32" />
+                        <PasswordBox x:Name="RegisterPassword" Header="Пароль, не меньше 8 символов" />
+                        <PasswordBox x:Name="RegisterPasswordRepeat" Header="Пароль ещё раз" />
+                        <Button x:Name="RegisterButton" Content="Создать аккаунт" Click="AccountRegister_Click"
+                                HorizontalAlignment="Stretch" Margin="0,8,0,0"
+                                Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
+                                BorderThickness="0" CornerRadius="18" Padding="12,10" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="AccountLoginPanel" Spacing="8" Visibility="Collapsed" Margin="0,6,0,0">
+                        <TextBox x:Name="LoginUsername" Header="Username" MaxLength="33" />
+                        <PasswordBox x:Name="LoginPassword" Header="Пароль" KeyDown="LoginPassword_KeyDown" />
+                        <Button Content="Войти" Click="AccountLogin_Click" HorizontalAlignment="Stretch" Margin="0,8,0,0"
+                                Background="{ThemeResource TgAccent}" Foreground="{ThemeResource TgOnAccent}"
+                                BorderThickness="0" CornerRadius="18" Padding="12,10" />
+                        <HyperlinkButton Content="Забыли пароль? Восстановить по ключу" Click="AccountShowRecover_Click"
+                                         HorizontalAlignment="Center" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="AccountRecoverPanel" Spacing="8" Visibility="Collapsed" Margin="0,6,0,0">
+                        <TextBox x:Name="RecoverKey" Header="Ключ восстановления" FontFamily="Consolas"
+                                 PlaceholderText="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" />
+                        <PasswordBox x:Name="RecoverPassword" Header="Новый пароль" />
+                        <PasswordBox x:Name="RecoverPasswordRepeat" Header="Новый пароль ещё раз" />
+                        <Button Content="Восстановить доступ" Click="AccountRecover_Click" HorizontalAlignment="Stretch"
+                                Margin="0,8,0,0" Background="{ThemeResource TgAccent}"
+                                Foreground="{ThemeResource TgOnAccent}" BorderThickness="0" CornerRadius="18"
+                                Padding="12,10" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="AccountRecoveryKeyPanel" Spacing="10" Visibility="Collapsed" Margin="0,6,0,0">
+                        <Border CornerRadius="16" Padding="16" Background="{ThemeResource TgElevated}"
+                                BorderBrush="{ThemeResource TgGlassRim}" BorderThickness="1">
+                            <TextBlock x:Name="RecoveryKeyText" FontFamily="Consolas" FontSize="20"
+                                       TextAlignment="Center" TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                                       Foreground="{ThemeResource TgText}" />
+                        </Border>
+                        <Button x:Name="CopyRecoveryKeyButton" Content="Скопировать ключ" Click="CopyRecoveryKey_Click"
+                                HorizontalAlignment="Stretch" CornerRadius="18" Padding="12,10" />
+                        <TextBlock Text="Запишите ключ на бумаге или сохраните в менеджере паролей. Не храните его рядом с паролем и не отправляйте в чаты."
+                                   TextWrapping="Wrap" TextAlignment="Center" Foreground="{ThemeResource TgHint}" FontSize="13" />
+                        <CheckBox x:Name="RecoveryKeySaved" Content="Я сохранил(а) ключ в надёжном месте"
+                                  Checked="RecoveryKeySaved_Changed" Unchecked="RecoveryKeySaved_Changed" />
+                        <Button x:Name="RecoveryKeyDoneButton" Content="Готово" Click="RecoveryKeyDone_Click" IsEnabled="False"
+                                HorizontalAlignment="Stretch" Background="{ThemeResource TgAccent}"
+                                Foreground="{ThemeResource TgOnAccent}" BorderThickness="0" CornerRadius="18"
+                                Padding="12,10" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="AccountConflictPanel" Spacing="8" Visibility="Collapsed" Margin="0,6,0,0">
+                        <TextBox x:Name="ConflictUsername" Header="Новый username" MaxLength="32" />
+                        <Button Content="Сохранить" Click="ConflictSave_Click" HorizontalAlignment="Stretch"
+                                Margin="0,8,0,0" Background="{ThemeResource TgAccent}"
+                                Foreground="{ThemeResource TgOnAccent}" BorderThickness="0" CornerRadius="18"
+                                Padding="12,10" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="AccountError" Visibility="Collapsed" TextWrapping="Wrap" TextAlignment="Center"
+                               Foreground="{ThemeResource TgDanger}" />
+                    <ProgressRing x:Name="AccountBusy" IsActive="True" Width="28" Height="28" Visibility="Collapsed"
+                                  Foreground="{ThemeResource TgAccent}" />
+                    <StackPanel Spacing="2" Margin="0,8,0,0" HorizontalAlignment="Center">
+                        <HyperlinkButton x:Name="AccountBackLink" Content="Назад" Click="AccountShowWelcome_Click"
+                                         HorizontalAlignment="Center" />
+                        <HyperlinkButton x:Name="AccountOtherLink" Click="AccountOther_Click" HorizontalAlignment="Center" />
+                        <HyperlinkButton x:Name="AccountLaterLink" Content="Напомнить позже" Click="AccountLater_Click"
+                                         HorizontalAlignment="Center" />
+                    </StackPanel>
+                    <!-- Свой Node выбирается до входа: аккаунт и username живут на нём. -->
+                    <StackPanel x:Name="AccountNodePanel" Spacing="6" Margin="0,14,0,0">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Spacing="4">
+                            <TextBlock x:Name="AccountNodeText" Foreground="{ThemeResource TgHint}" FontSize="12"
+                                       VerticalAlignment="Center" />
+                            <HyperlinkButton Content="Изменить" FontSize="12" Padding="4,2" Click="AccountNodeEdit_Click" />
+                        </StackPanel>
+                        <StackPanel x:Name="AccountNodeEditor" Spacing="6" Visibility="Collapsed">
+                            <TextBox x:Name="AccountNodeInput" Header="Адрес Node" PlaceholderText="https://node.example.org" />
+                            <Button Content="Подключиться" Click="AccountNodeConnect_Click" HorizontalAlignment="Stretch"
+                                    CornerRadius="18" Padding="12,8" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </ScrollViewer>
+        </Grid>
+
         <ContentDialog x:Name="NewContactDialog" Title="Новый диалог" PrimaryButtonText="Начать диалог"
                        CloseButtonText="Отмена" PrimaryButtonClick="NewContactDialog_PrimaryButtonClick">
             <StackPanel Spacing="10">
@@ -1191,18 +1314,6 @@
                            Foreground="{ThemeResource TgHint}" TextWrapping="Wrap" Visibility="Collapsed" />
                 <TextBlock x:Name="AddMembersError" TextWrapping="Wrap" Foreground="{ThemeResource TgDanger}"
                            Visibility="Collapsed" />
-            </StackPanel>
-        </ContentDialog>
-
-        <ContentDialog x:Name="OnboardingDialog" Title="Добро пожаловать в Turat" PrimaryButtonText="Продолжить"
-                       PrimaryButtonClick="OnboardingDialog_PrimaryButtonClick">
-            <StackPanel Spacing="10">
-                <Image Source="ms-appx:///Assets/Turat.png" Width="104" Height="104"
-                       HorizontalAlignment="Center" Stretch="Uniform" Margin="0,2,0,8" />
-                <TextBlock Text="Придумайте видимое имя и username — их увидят собеседники. Ключи остаются на устройстве."
-                           TextWrapping="Wrap" Foreground="{ThemeResource TgHint}" />
-                <TextBox x:Name="OnboardingDisplayName" Header="Видимое имя" />
-                <TextBox x:Name="OnboardingUsername" Header="Username" />
             </StackPanel>
         </ContentDialog>
 

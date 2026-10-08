@@ -421,7 +421,7 @@ fn item_of(message: &Message) -> Option<ChannelItem> {
 }
 
 impl AppCore {
-    fn me(&self) -> String {
+    pub(super) fn me(&self) -> String {
         self.identity.public.user_id.clone()
     }
 

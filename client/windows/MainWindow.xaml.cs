@@ -52,7 +52,6 @@ public sealed partial class MainWindow : Window
     private bool _submitting;
     private AppSnapshot? _snapshot;
     private bool _updating;
-    private bool _onboardingShown;
     private string? _editingEventId;
     private string? _replyToEventId;
     private string? _draftChatId;
@@ -257,11 +256,7 @@ public sealed partial class MainWindow : Window
             if (ChannelPage.Visibility == Visibility.Visible) FillChannelPage();
             UpdateCommentsPage();
 
-            if (snapshot.OnboardingRequired && !_onboardingShown)
-            {
-                _onboardingShown = true;
-                _ = ShowOnboardingAsync();
-            }
+            UpdateAccountPage();
         }
         finally
         {
@@ -1002,6 +997,7 @@ public sealed partial class MainWindow : Window
     private void FillSettings()
     {
         if (_snapshot is null) return;
+        FillAccountSettings();
         _updating = true;
         SettingsInitials.Text = Formatting.Initials(
             _snapshot.Profile.DisplayName.Length > 0 ? _snapshot.Profile.DisplayName : "Turat");
@@ -1147,21 +1143,6 @@ public sealed partial class MainWindow : Window
     private async void Metadata_Click(object sender, RoutedEventArgs e) =>
         await ExecuteAsync(new { command = "cycle_metadata_protection" });
 
-    private async void RevokeDevice_Click(object sender, RoutedEventArgs e)
-    {
-        string deviceId = RevokeDeviceInput.Text.Trim();
-        if (deviceId.Length == 0)
-        {
-            await ShowErrorAsync("Введите DeviceID устройства, которое нужно отозвать");
-            return;
-        }
-        if (!await ConfirmAsync("Отозвать устройство?", "Устройство потеряет доступ к вашим диалогам.")) return;
-        if (await ExecuteAsync(new { command = "revoke_device", device_id = deviceId }))
-        {
-            RevokeDeviceInput.Text = string.Empty;
-        }
-    }
-
     private async void Sync_Click(object sender, RoutedEventArgs e)
     {
         await ExecuteAsync(new { command = "sync" });
@@ -1304,60 +1285,7 @@ public sealed partial class MainWindow : Window
         deferral.Complete();
     }
 
-    private async Task ShowOnboardingAsync()
-    {
-        await Task.Yield();
-        if (_snapshot?.OnboardingRequired == true) await OnboardingDialog.ShowAsync();
-    }
-
-    private async void OnboardingDialog_PrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
-    {
-        ContentDialogButtonClickDeferral deferral = args.GetDeferral();
-        args.Cancel = !await ExecuteAsync(new
-        {
-            command = "save_profile",
-            username = OnboardingUsername.Text,
-            display_name = OnboardingDisplayName.Text,
-            about = string.Empty,
-            avatar_base64 = (string?)null,
-        });
-        deferral.Complete();
-    }
-
-    // --- вложения и пакеты ----------------------------------------------------
-
-    private async void CreateBackup_Click(object sender, RoutedEventArgs e) => await ExportSecretAsync("create_backup", "Turat.ttbackup", ".ttbackup");
-    private async void RestoreBackup_Click(object sender, RoutedEventArgs e) => await ImportSecretAsync("restore_backup", [".ttbackup"]);
-    private async void CreateDeviceLink_Click(object sender, RoutedEventArgs e) => await ExportSecretAsync("create_device_link", "Turat.ttlink", ".ttlink");
-    private async void ImportDeviceLink_Click(object sender, RoutedEventArgs e) => await ImportSecretAsync("import_device_link", [".ttlink"]);
-    private async void ExportPortable_Click(object sender, RoutedEventArgs e) => await ExportFileAsync("export_portable", "messages.ttenv", ".ttenv");
-    private async void ImportPortable_Click(object sender, RoutedEventArgs e) => await ImportFileAsync("import_portable", [".ttenv"]);
-    private async void ExportDiscovery_Click(object sender, RoutedEventArgs e) => await ExportFileAsync("export_discovery", "network.ttbridge", ".ttbridge");
-    private async void ImportDiscovery_Click(object sender, RoutedEventArgs e) => await ImportFileAsync("import_discovery", [".ttbridge"]);
-
-    private async Task ExportSecretAsync(string command, string name, string extension)
-    {
-        StorageFile? file = await SaveFileAsync(name, extension);
-        if (file is not null) await ExecuteAsync(new { command, path = file.Path, passphrase = SecurityPassphrase.Password });
-    }
-
-    private async Task ImportSecretAsync(string command, IReadOnlyList<string> extensions)
-    {
-        StorageFile? file = await OpenFileAsync(extensions);
-        if (file is not null) await ExecuteAsync(new { command, path = file.Path, passphrase = SecurityPassphrase.Password });
-    }
-
-    private async Task ExportFileAsync(string command, string name, string extension)
-    {
-        StorageFile? file = await SaveFileAsync(name, extension);
-        if (file is not null) await ExecuteAsync(new { command, path = file.Path });
-    }
-
-    private async Task ImportFileAsync(string command, IReadOnlyList<string> extensions)
-    {
-        StorageFile? file = await OpenFileAsync(extensions);
-        if (file is not null) await ExecuteAsync(new { command, path = file.Path });
-    }
+    // --- выбор файлов ----------------------------------------------------------
 
     private async Task<StorageFile?> OpenFileAsync(IReadOnlyList<string> extensions)
     {

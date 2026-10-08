@@ -576,6 +576,10 @@ pub struct Settings {
     /// Номер последней опубликованной записи в directory: сервер требует роста.
     #[serde(default)]
     pub directory_sequence: i64,
+    /// Когда профиль и username последний раз публиковались. Запись на Node живёт 30 дней,
+    /// поэтому раз в неделю она продлевается — иначе username освободился бы для другого.
+    #[serde(default)]
+    pub directory_published_at_unix_milliseconds: i64,
 }
 
 impl Default for Settings {
@@ -586,6 +590,7 @@ impl Default for Settings {
             metadata_protection: MetadataProtection::Balanced,
             publish_presence: false,
             directory_sequence: 0,
+            directory_published_at_unix_milliseconds: 0,
         }
     }
 }
@@ -661,6 +666,36 @@ pub struct Snapshot {
     pub channel: Option<ChannelView>,
     /// Комментарии к открытому посту канала (`channel.threadPostEventId`).
     pub comments: Vec<Message>,
+    /// Учётная запись: вошёл ли пользователь, его устройства, ключ восстановления к показу.
+    pub account: AccountView,
+}
+
+/// Учётная запись для интерфейса.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountView {
+    /// `none` — устройство чистое, нужно войти или зарегистрироваться; `legacy` — переписка
+    /// есть, а аккаунта ещё нет (установка до появления аккаунтов); `active` — вход выполнен.
+    pub state: String,
+    pub username: String,
+    /// Node, на котором лежит сейф аккаунта.
+    pub node: String,
+    /// Ключ восстановления, который надо показать один раз; после подтверждения — `null`.
+    pub recovery_key: Option<String>,
+    /// Username занят на текущем Node: пользователь должен выбрать другой.
+    pub username_conflict: bool,
+    /// Сообщение для экрана входа: например, что сеанс завершили с другого устройства.
+    pub notice: Option<String>,
+    pub devices: Vec<AccountDeviceView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDeviceView {
+    pub device_id: String,
+    pub name: String,
+    pub current: bool,
+    pub added_at_unix_milliseconds: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -981,6 +1016,55 @@ pub enum Command {
     /// Сброс, отказ и микрофон делаются без ядра (`turattext_call_action`); эта команда
     /// отправляет собеседнику оставшиеся сигналы и пишет звонок в историю сразу.
     SettleCalls,
+    /// Свободен ли username на текущем Node. Возвращает `{username, available}`.
+    CheckUsername {
+        username: String,
+    },
+    /// Регистрация: username — он же логин, видимое имя и пароль. Возвращает `{recoveryKey}`.
+    /// На устройстве с перепиской без аккаунта создаёт аккаунт для неё.
+    AccountRegister {
+        username: String,
+        #[serde(default)]
+        display_name: String,
+        password: String,
+        #[serde(default)]
+        device_name: String,
+    },
+    /// Вход по username и паролю. `discard_local` — согласие удалить переписку без аккаунта.
+    AccountLogin {
+        username: String,
+        password: String,
+        #[serde(default)]
+        device_name: String,
+        #[serde(default)]
+        discard_local: bool,
+    },
+    /// Восстановление доступа по ключу с новым паролем. Возвращает `{recoveryKey}` — новый ключ.
+    AccountRecover {
+        recovery_key: String,
+        new_password: String,
+        #[serde(default)]
+        device_name: String,
+        #[serde(default)]
+        discard_local: bool,
+    },
+    AccountChangePassword {
+        old_password: String,
+        new_password: String,
+    },
+    /// Новый ключ восстановления вместо старого. Возвращает `{recoveryKey}`.
+    AccountNewRecoveryKey {
+        password: String,
+    },
+    /// Пользователь сохранил ключ восстановления — больше его не показывать.
+    AccountConfirmRecoveryKey,
+    /// Выйти из аккаунта на этом устройстве: всё локальное стирается.
+    AccountLogout,
+    /// Имя этого устройства в списке сеансов.
+    AccountRenameDevice {
+        name: String,
+    },
+    AccountDismissNotice,
 }
 
 #[derive(Debug, Serialize)]

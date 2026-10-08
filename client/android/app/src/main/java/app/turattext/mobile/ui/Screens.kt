@@ -512,46 +512,6 @@ fun ForwardScreen(state: AppSnapshot, onBack: () -> Unit, onPick: (String) -> Un
     }
 }
 
-/** Первый запуск: имя и username, как в приветственном экране Telegram. */
-@Composable
-fun OnboardingScreen(profile: Profile, onSave: (String, String) -> Unit) {
-    val colors = Telegram.colors
-    var username by remember { mutableStateOf(profile.username) }
-    var name by remember { mutableStateOf(profile.displayName) }
-    Column(
-        Modifier.fillMaxSize().background(colors.window).statusBarsPadding().imePadding()
-            .padding(horizontal = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Spacer(Modifier.height(48.dp))
-        Image(
-            painter = painterResource(R.drawable.turat_logo),
-            contentDescription = "Логотип Turat",
-            modifier = Modifier.size(112.dp),
-        )
-        Spacer(Modifier.height(18.dp))
-        Text("Turat", color = colors.text, fontSize = 24.sp, fontWeight = FontWeight.Medium)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Придумайте видимое имя и username — их увидят собеседники. Ключи остаются на устройстве.",
-            Modifier.padding(horizontal = 24.dp),
-            color = colors.hint,
-            fontSize = 14.sp,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(22.dp))
-        TelegramField(name, { name = it }, "Видимое имя")
-        TelegramField(username, { username = it }, "Username", imeAction = ImeAction.Done)
-        Spacer(Modifier.height(22.dp))
-        TelegramButton(
-            "Продолжить",
-            { onSave(username, name) },
-            enabled = name.isNotBlank(),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp),
-        )
-    }
-}
-
 /** Профиль собеседника: шапка с аватаром и разделы с данными. */
 @Composable
 fun ContactProfileScreen(
@@ -616,7 +576,7 @@ private enum class SettingsCategory(val title: String) {
     Profile("Профиль"),
     Appearance("Оформление"),
     Connection("Приватность и сеть"),
-    Data("Данные и устройства"),
+    Data("Аккаунт и устройства"),
 }
 
 /** Компактные стеклянные сегменты вместо длинного непрерывного экрана настроек. */
@@ -698,10 +658,12 @@ private fun FontCard(
 @Composable
 fun SettingsScreen(
     state: AppSnapshot,
+    busy: Boolean,
     update: UpdateState,
     theme: AppTheme,
     font: AppFont,
     actions: AppActions,
+    onSetUpAccount: () -> Unit,
     onThemeChange: (AppTheme) -> Unit,
     onFontChange: (AppFont) -> Unit,
     onOpenUpdate: () -> Unit,
@@ -713,8 +675,6 @@ fun SettingsScreen(
     var name by remember { mutableStateOf(state.profile.displayName) }
     var about by remember { mutableStateOf(state.profile.about) }
     var node by remember { mutableStateOf(state.settings.bootstrapUrl) }
-    var passphrase by remember { mutableStateOf("") }
-    var revokeId by remember { mutableStateOf("") }
     var category by remember { mutableStateOf(SettingsCategory.Profile) }
 
     TelegramScreen("Настройки", onBack) {
@@ -773,7 +733,13 @@ fun SettingsScreen(
             }
         }
         item { TelegramField(name, { name = it }, "Видимое имя") }
-        item { TelegramField(username, { username = it }, "Username") }
+        item {
+            TelegramField(
+                username,
+                { username = it },
+                if (state.account.signedIn) "Username — он же логин" else "Username",
+            )
+        }
         item { TelegramField(about, { about = it }, "О себе", singleLine = false) }
         item {
             TelegramButton(
@@ -865,48 +831,12 @@ fun SettingsScreen(
         }
 
         if (category == SettingsCategory.Data) {
-        item { SectionTitle("Устройства и резервные копии") }
-        item { TelegramField(passphrase, { passphrase = it }, "Пароль пакета", password = true) }
-        item {
-            TwoButtons(
-                "Создать backup", { actions.export("create_backup", passphrase, "Turat.ttbackup") },
-                "Восстановить", { actions.importFile("restore_backup", passphrase, arrayOf("*/*")) },
-            )
-        }
-        item {
-            TwoButtons(
-                "Связать устройство", { actions.export("create_device_link", passphrase, "Turat.ttlink") },
-                "Импорт связи", { actions.importFile("import_device_link", passphrase, arrayOf("*/*")) },
-            )
-        }
-        item { TelegramField(revokeId, { revokeId = it }, "DeviceID потерянного устройства") }
-        item {
-            SectionRow(
-                R.drawable.ic_delete,
-                "Отозвать устройство",
-                if (revokeId.isBlank()) "Сначала введите DeviceID" else null,
-                danger = true,
-            ) {
-                if (revokeId.isNotBlank()) {
-                    actions.command(CoreJson.command("revoke_device", "device_id" to revokeId), null)
-                    revokeId = ""
-                }
-            }
-        }
-
-        item { SectionTitle("Передача без прямого подключения") }
-        item {
-            TwoButtons(
-                "Экспорт сообщений", { actions.export("export_portable", "", "messages.ttenv") },
-                "Доставить пакет", { actions.importFile("import_portable", "", arrayOf("*/*")) },
-            )
-        }
-        item {
-            TwoButtons(
-                "Экспорт сети", { actions.export("export_discovery", "", "network.ttbridge") },
-                "Импорт сети", { actions.importFile("import_discovery", "", arrayOf("*/*")) },
-            )
-        }
+        accountSettings(
+            state = state,
+            busy = busy,
+            run = { command, after -> actions.command(command) { ok -> after(ok) } },
+            onSetUpAccount = onSetUpAccount,
+        )
 
         item { SectionTitle("Обновления") }
         item {
@@ -947,16 +877,5 @@ fun SettingsScreen(
                 textAlign = TextAlign.Center,
             )
         }
-    }
-}
-
-@Composable
-private fun TwoButtons(left: String, onLeft: () -> Unit, right: String, onRight: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        SecondaryButton(left, Modifier.weight(1f), onLeft)
-        SecondaryButton(right, Modifier.weight(1f), onRight)
     }
 }

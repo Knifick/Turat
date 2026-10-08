@@ -395,10 +395,32 @@ public sealed record AppSnapshot(
     IReadOnlyList<SearchHitModel> SearchResults,
     GroupViewModel? Group = null,
     ChannelViewModel? Channel = null,
-    IReadOnlyList<MessageModel>? Comments = null)
+    IReadOnlyList<MessageModel>? Comments = null,
+    [property: JsonPropertyName("account")] AccountModel? AccountView = null)
 {
+    /// <summary>Учётная запись; ядро старой версии её не присылает.</summary>
+    [JsonIgnore] public AccountModel Account => AccountView ?? AccountModel.None;
+
     [JsonIgnore] public ChatModel? SelectedChat => Chats.FirstOrDefault(value => value.UserId == SelectedContactId);
 }
+
+/// <summary>
+/// Учётная запись. <c>State</c>: <c>none</c> — нужен вход или регистрация; <c>legacy</c> —
+/// переписка есть, а аккаунта ещё нет; <c>active</c> — вход выполнен.
+/// </summary>
+public sealed record AccountModel(
+    string State,
+    string Username,
+    string Node,
+    string? RecoveryKey,
+    bool UsernameConflict,
+    string? Notice,
+    IReadOnlyList<AccountDeviceModel> Devices)
+{
+    public static readonly AccountModel None = new("none", string.Empty, string.Empty, null, false, null, []);
+}
+
+public sealed record AccountDeviceModel(string DeviceId, string Name, bool Current, long AddedAtUnixMilliseconds);
 
 public sealed record GroupPermissionsModel(bool MembersCanInvite, bool MembersCanEditInfo);
 

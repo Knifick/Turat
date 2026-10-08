@@ -106,7 +106,6 @@ impl AppCore {
         mailbox: &OwnedMailbox,
         prekey_sequence: i64,
     ) -> Result<(), CoreError> {
-        let device_list = self.ensure_device_list()?;
         let stored = self.store.own_routing()?;
         let now = chrono::Utc::now().timestamp_millis();
         let current = stored.as_ref().is_some_and(|routing| {
@@ -129,6 +128,15 @@ impl AppCore {
             .routing(node, &self.identity.public.user_id)
             .ok()
             .flatten();
+        // Другое устройство аккаунта могло обновить список устройств: публиковать адрес со
+        // старым списком значило бы вычеркнуть его.
+        if let Some(remote) = remote.as_ref().filter(|value| value.verify()) {
+            if !self.adopt_device_list(&remote.descriptor.device_list)? {
+                return Err(CoreError::InvalidInput(
+                    "Этот сеанс завершён с другого устройства".to_owned(),
+                ));
+            }
+        }
         let sequence = self
             .store
             .routing_sequence()?
@@ -136,6 +144,7 @@ impl AppCore {
             .max(remote.as_ref().map_or(0, |value| value.descriptor.sequence))
             + 1;
         let previous = remote.as_ref().or(stored.as_ref());
+        let device_list = self.ensure_device_list()?;
         let routing = SignedRoutingDescriptor::create(
             &self.identity,
             &device_list,
@@ -150,23 +159,38 @@ impl AppCore {
         Ok(())
     }
 
+    /// Список устройств с этим устройством. Если его в списке нет (только что вошли в аккаунт
+    /// или другое устройство опубликовало список, не зная о нас) — добавляемся сами: у каждого
+    /// устройства аккаунта есть ключ личности, которым список подписывается.
     fn ensure_device_list(&mut self) -> Result<SignedDeviceList, CoreError> {
-        if let Some(list) = self.store.device_list()?
+        let stored = self.store.device_list()?;
+        if let Some(list) = &stored
             && list.contains(&self.identity.public.device_id)
         {
-            return Ok(list);
+            return Ok(list.clone());
         }
         if !self.identity.is_authority() {
             return Err(CoreError::InvalidInput(
                 "Список устройств подписывает корневое устройство: свяжите его заново".to_owned(),
             ));
         }
-        let list = SignedDeviceList::create(
-            &self.identity,
-            vec![WireIdentity::from(&self.identity.public)],
-            Vec::new(),
-            1,
-        )?;
+        let me = self.identity.public.device_id.clone();
+        let (mut devices, revocations, sequence) = match stored {
+            Some(list) => (
+                list.document.devices,
+                list.document.revocations,
+                list.document.sequence + 1,
+            ),
+            None => (Vec::new(), Vec::new(), 1),
+        };
+        devices.retain(|device| {
+            device.device_id != me
+                && !revocations
+                    .iter()
+                    .any(|revocation| revocation.device_id == device.device_id)
+        });
+        devices.push(WireIdentity::from(&self.identity.public));
+        let list = SignedDeviceList::create(&self.identity, devices, revocations, sequence)?;
         self.store.save_device_list(&list)?;
         Ok(list)
     }
@@ -319,7 +343,16 @@ impl AppCore {
             .store
             .own_routing()?
             .ok_or_else(|| CoreError::InvalidInput("Свой адрес не опубликован".to_owned()))?;
-        let routing = self.peer_routing(node, &job.user_id)?;
+        let own = job.user_id == self.identity.public.user_id;
+        let routing = if own {
+            match self.own_devices_routing(node)? {
+                Some(routing) => routing,
+                // Других устройств нет — рассылать некому, задача выполнена.
+                None => return Ok(()),
+            }
+        } else {
+            self.peer_routing(node, &job.user_id)?
+        };
 
         // Личный ключ записи уходит только внутри уже зашифрованного пакета: получив его,
         // собеседник перестаёт зависеть от узкой квоты публичного ящика.
@@ -341,6 +374,9 @@ impl AppCore {
         let mut failure: Option<CoreError> = None;
         for entry in routing.descriptor.devices.clone() {
             let device_id = entry.identity.device_id.clone();
+            if own && device_id == self.identity.public.device_id {
+                continue;
+            }
             let private = self.store.grants(&job.user_id, &device_id)?;
             let public = routing.contact_mailboxes(&device_id);
             let routes = if private.is_empty() { public } else { private.clone() };
@@ -350,6 +386,7 @@ impl AppCore {
             // Участники группы не обязаны быть знакомы. Первое событие незнакомцу уходит
             // в публичный ящик под его квотой и PoW; с ним же приходит наш личный адрес.
             if private.is_empty()
+                && !own
                 && !is_contact_request(&job.event)
                 && !is_group_id(&job.event.conversation_id)
                 && !is_channel_id(&job.event.conversation_id)
@@ -368,10 +405,42 @@ impl AppCore {
         match (delivered, failure) {
             (true, _) => Ok(()),
             (false, Some(error)) => Err(error),
+            // Своё устройство без живого ящика давно не появлялось: ждать его незачем,
+            // при возвращении оно возьмёт снимок.
+            (false, None) if own => Ok(()),
             (false, None) => Err(CoreError::InvalidInput(
                 "У собеседника нет доступного почтового ящика".to_owned(),
             )),
         }
+    }
+
+    /// Адреса других устройств аккаунта. Берётся с Node, а не из кэша: только что вошедшее
+    /// устройство должно получить изменения сразу.
+    fn own_devices_routing(
+        &mut self,
+        node: &NodeDescriptor,
+    ) -> Result<Option<SignedRoutingDescriptor>, CoreError> {
+        let me = self.identity.public.user_id.clone();
+        let fresh = self
+            .network
+            .routing(node, &me)
+            .ok()
+            .flatten()
+            .filter(|routing| routing.descriptor.user_id == me && routing.verify());
+        if let Some(routing) = &fresh {
+            self.store.save_peer_routing(routing)?;
+        }
+        let routing = match fresh {
+            Some(routing) => Some(routing),
+            None => self.store.peer_routing(&me)?.filter(SignedRoutingDescriptor::verify),
+        };
+        Ok(routing.filter(|routing| {
+            routing
+                .descriptor
+                .devices
+                .iter()
+                .any(|entry| entry.identity.device_id != self.identity.public.device_id)
+        }))
     }
 
     fn deliver_to_device(
@@ -581,6 +650,13 @@ impl AppCore {
                 "Обратный адрес отправителя недействителен".to_owned(),
             ));
         }
+        // Отозванное устройство может предъявить старый список устройств, где оно ещё есть.
+        // Если нам уже известен более новый список без него — это откат, и событие не принимается.
+        if self.device_was_revoked(&event.sender_user_id, &sender.device_id, routing)? {
+            return Err(CoreError::Crypto(
+                "Устройство отправителя исключено из его аккаунта".to_owned(),
+            ));
+        }
         self.store.save_peer_routing(routing)?;
         for grant in &package.body.reply_grants {
             // Принимаем обратный адрес только на том же Node, с которым работаем сами:
@@ -592,6 +668,11 @@ impl AppCore {
                 self.store
                     .save_grant(&event.sender_user_id, &sender.device_id, grant)?;
             }
+        }
+
+        // Своё другое устройство: синхронизация, а не переписка.
+        if event.sender_user_id == self.identity.public.user_id {
+            return self.apply_self_event(event, sender, routing);
         }
 
         // Событие группы не создаёт запрос на общение: у группы свои правила допуска.
@@ -635,6 +716,34 @@ impl AppCore {
         Ok(applied)
     }
 
+    /// Есть ли у нас более новый список устройств этого пользователя, где отправителя уже нет.
+    fn device_was_revoked(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        presented: &SignedRoutingDescriptor,
+    ) -> Result<bool, CoreError> {
+        let presented_sequence = presented.descriptor.device_list.document.sequence;
+        let mut known = Vec::new();
+        if let Some(routing) = self.store.peer_routing(user_id)? {
+            known.push(routing.descriptor.device_list);
+        }
+        if user_id == self.identity.public.user_id
+            && let Some(list) = self.store.device_list()?
+        {
+            known.push(list);
+        }
+        Ok(known.iter().any(|list| {
+            list.document.sequence > presented_sequence
+                && (!list.contains(device_id)
+                    || list
+                        .document
+                        .revocations
+                        .iter()
+                        .any(|revocation| revocation.device_id == device_id))
+        }))
+    }
+
     /// Сообщение, правка, реакция или квитанция — общие для личного диалога и группы.
     ///
     /// Цель правки или реакции ищется только в том же диалоге: знание чужого `eventId`
@@ -655,7 +764,7 @@ impl AppCore {
         Ok(match event.kind.as_str() {
             KIND_TEXT => {
                 let payload: TextPayload = event.decode_payload()?;
-                if payload.text.trim().is_empty() {
+                if payload.text.trim().is_empty() || self.store.message(&event.event_id)?.is_some() {
                     return Ok(false);
                 }
                 self.store.save_message(&Message {
@@ -683,6 +792,12 @@ impl AppCore {
             }
             KIND_ATTACHMENT => {
                 let payload: AttachmentPayload = event.decode_payload()?;
+                if self.store.message(&event.event_id)?.is_some() {
+                    return Ok(false);
+                }
+                // Манифест хранится и после загрузки: по нему файл скачает другое устройство
+                // аккаунта.
+                self.store.save_event_manifest(&event.event_id, &payload.manifest)?;
                 self.store.save_message(&Message {
                     event_id: event.event_id.clone(),
                     conversation_id: conversation.to_owned(),

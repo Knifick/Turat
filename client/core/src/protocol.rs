@@ -198,6 +198,16 @@ pub const KIND_CHANNEL_VIEWS: &str = "channel.views";
 pub const KIND_CHANNEL_STATS: &str = "channel.stats";
 
 /// Голосовой звонок: приглашение с комнатой ретранслятора и одноразовым ключом звонящего.
+/// Служебные события между устройствами одного аккаунта: идут только «самому себе»
+/// (диалог личности с самой собой) и чужим устройствам не принимаются.
+pub const KIND_SYNC_RECORDS: &str = "sync.records";
+pub const KIND_SYNC_SNAPSHOT: &str = "sync.snapshot";
+pub const KIND_DEVICE_SIGNED_OUT: &str = "device.signed_out";
+/// Новое устройство появилось в аккаунте. Уходит и своим устройствам, и принятым контактам:
+/// вместе с ним собеседник получает свежий адрес и начинает шифровать и под новое устройство.
+/// Старые клиенты такой вид не знают и просто игнорируют его, но адрес всё равно сохраняют.
+pub const KIND_DEVICE_HELLO: &str = "device.hello";
+
 pub const KIND_CALL_OFFER: &str = "call.offer";
 /// Устройство собеседника приняло приглашение и звонит.
 pub const KIND_CALL_RINGING: &str = "call.ringing";

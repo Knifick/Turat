@@ -23,8 +23,11 @@ internal sealed partial class RustCore : IDisposable
 
     public RustCore()
     {
-        string appDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TuratText");
+        // TURAT_DATA_DIR — отдельный профиль: второй аккаунт на том же компьютере или проверка
+        // сборки, не трогая основную переписку.
+        string appDirectory = Environment.GetEnvironmentVariable("TURAT_DATA_DIR") is { Length: > 0 } custom
+            ? custom
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TuratText");
         Directory.CreateDirectory(appDirectory);
         byte[] vaultKey = LoadOrCreateVaultKey(appDirectory);
         try

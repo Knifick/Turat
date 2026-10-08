@@ -20,7 +20,23 @@ pub struct StoredIdentity {
 
 impl StoredIdentity {
     pub fn create() -> Result<Self, CoreError> {
-        let identity_key = SigningKey::random(&mut OsRng);
+        Self::with_identity_key(SigningKey::random(&mut OsRng))
+    }
+
+    /// Новое устройство существующего аккаунта: ключ личности приходит из сейфа, а ключ
+    /// устройства и его сертификат — свои. Так у каждого устройства свои сессии и ящик, но
+    /// говорят они от одной личности.
+    pub fn for_account(identity_private_key: &str) -> Result<Self, CoreError> {
+        let der = STANDARD.decode(identity_private_key)?;
+        Self::with_identity_key(SigningKey::from_pkcs8_der(&der)?)
+    }
+
+    /// Ключ личности для сейфа аккаунта; у устройства, привязанного старым способом, его нет.
+    pub fn identity_private_key(&self) -> Option<&str> {
+        self.identity_private_key.as_deref()
+    }
+
+    fn with_identity_key(identity_key: SigningKey) -> Result<Self, CoreError> {
         let device_key = SigningKey::random(&mut OsRng);
         let identity_spki = identity_key
             .verifying_key()

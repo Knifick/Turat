@@ -1,3 +1,4 @@
+mod account;
 mod blobs;
 mod calls;
 mod core;
@@ -87,6 +88,9 @@ pub enum CoreError {
     Base64(#[from] base64::DecodeError),
     #[error("Ошибка криптографии: {0}")]
     Crypto(String),
+    /// Username на текущем Node принадлежит другой учётной записи.
+    #[error("Username @{0} уже занят на этом Node — выберите другой")]
+    UsernameTaken(String),
 }
 
 impl From<p256::pkcs8::Error> for CoreError {
